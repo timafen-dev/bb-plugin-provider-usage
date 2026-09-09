@@ -1,5 +1,6 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
+import { hostContract } from "./host-contract";
 import {
   PROVIDER_KEYS,
   assembleDashboard,
@@ -282,9 +283,48 @@ function createLimitStore(bb: BbPluginApi) {
     if (lastFetch) write.run("last-fetch", JSON.stringify(lastFetch));
   };
 
+  const claudeHost = bb.hosts.experimental_client({ contract: hostContract });
+
+  /**
+   * BB's own probe reads os.homedir()/.claude and ignores CLAUDE_CONFIG_DIR,
+   * even though the code beside it honours the variable. On a computer running
+   * two machines with two Claude logins every machine reports whichever account
+   * sits in the home directory, so the same numbers appear twice and the second
+   * account is invisible. Ask the machine itself instead; its worker inherits
+   * the daemon environment and therefore resolves its own login.
+   *
+   * Falls back to whatever BB returned, so a machine without the host bundle
+   * loaded is no worse off than before.
+   */
+  const claudeForHost = async (
+    hostId: string | null,
+    fallback: ProviderLimitSlice,
+  ): Promise<ProviderLimitSlice> => {
+    if (hostId === null) return fallback;
+    try {
+      const own = await claudeHost.call("claudeUsage", null, { hostId });
+      if (own.status === "ok" && own.windows.length === 0) return fallback;
+      return {
+        status: own.status,
+        accountEmail: own.accountEmail,
+        planLabel: own.planLabel,
+        ...(own.message !== null ? { message: own.message } : {}),
+        windows: own.windows,
+      };
+    } catch (error) {
+      bb.log.warn(
+        `claude usage: falling back to BB's own reading for ${hostId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return fallback;
+    }
+  };
+
   const readLive = async (hostId: string | null) => {
     const raw = await bb.sdk.system.usageLimits(hostId ? { hostId } : {});
     const fresh = normalizeProviderLimits(raw);
+    fresh.claudeCode = await claudeForHost(hostId, fresh.claudeCode);
     const limits = overlayLastGoodLimits(fresh, lastGood);
     lastGood = rememberGoodLimits(limits, lastGood);
     lastFetch = {
