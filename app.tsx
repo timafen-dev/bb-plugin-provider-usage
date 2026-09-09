@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type PointerEvent } from "re
 import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { RefreshIcon } from "@hugeicons/core-free-icons";
-import type { rpcContract } from "./server";
+import type { freeTokensContract, rpcContract } from "./server";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -778,6 +778,139 @@ function ProviderLimitsSection({
   );
 }
 
+
+interface FreeTokenGroup {
+  label: string;
+  used: number;
+  limit: number;
+  remainingPercent: number;
+  models: { model: string; tokens: number }[];
+}
+
+interface FreeTokenAccount {
+  label: string;
+  error: string | null;
+  groups: FreeTokenGroup[];
+  unlimited: { model: string; tokens: number }[];
+}
+
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
+}
+
+function formatCountdown(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+/**
+ * Free daily tokens. OpenAI reports what was spent but never the allowance, so
+ * the allowance is configured in settings and the remainder is worked out here.
+ */
+function FreeTokensSection() {
+  const rpc = useRpc<typeof freeTokensContract>();
+  const [state, setState] = useState<
+    | { configured: boolean; secondsUntilReset: number; accounts: FreeTokenAccount[] }
+    | null
+  >(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const reload = useCallback(() => {
+    setLoading(true);
+    rpc
+      .call("freeTokens", {})
+      .then(
+        (result) => {
+          setState(result as never);
+          setError(null);
+        },
+        (cause: unknown) =>
+          setError(cause instanceof Error ? cause.message : String(cause)),
+      )
+      .finally(() => setLoading(false));
+  }, [rpc]);
+
+  useEffect(reload, [reload]);
+
+  if (state !== null && !state.configured && error === null) return null;
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between gap-2">
+        <div>
+          <CardTitle className="text-base">Free daily tokens</CardTitle>
+          <p className="text-xs text-muted-foreground">
+            OpenAI&apos;s complimentary allowance for traffic shared with them,
+            and how much of today is left
+            {state !== null
+              ? ` · resets in ${formatCountdown(state.secondsUntilReset)}`
+              : ""}
+          </p>
+        </div>
+        <Button variant="outline" size="sm" onClick={reload} disabled={loading}>
+          {loading ? "Refreshing…" : "Refresh"}
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {error !== null ? (
+          <p className="text-xs text-destructive">{error}</p>
+        ) : null}
+        {state === null && error === null ? (
+          <p className="text-xs text-muted-foreground">Loading…</p>
+        ) : null}
+        {(state?.accounts ?? []).map((account) => (
+          <div key={account.label} className="space-y-2">
+            <div className="text-sm font-medium">{account.label}</div>
+            {account.error !== null ? (
+              <p className="text-xs text-destructive">{account.error}</p>
+            ) : null}
+            {account.groups.map((group) => (
+              <div key={group.label} className="flex items-center gap-3">
+                <div className="w-40 shrink-0 truncate text-xs text-muted-foreground">
+                  {group.label}
+                </div>
+                <div className="h-2 flex-1 overflow-hidden rounded bg-muted">
+                  <div
+                    className="h-full"
+                    style={{
+                      width: `${group.remainingPercent}%`,
+                      background:
+                        group.remainingPercent <= 5
+                          ? "#c0392b"
+                          : group.remainingPercent <= 20
+                            ? "#b8860b"
+                            : "#1d7a4d",
+                    }}
+                  />
+                </div>
+                <div className="w-44 shrink-0 text-right text-xs">
+                  <b>{Math.round(group.remainingPercent)}% left</b>
+                  <span className="text-muted-foreground">
+                    {" "}
+                    · {formatTokens(group.used)} of {formatTokens(group.limit)}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {account.unlimited.length > 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No allowance configured:{" "}
+                {account.unlimited
+                  .map((row) => `${row.model} ${formatTokens(row.tokens)}`)
+                  .join(", ")}
+              </p>
+            ) : null}
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 function DashboardBody({
   hostId,
   onHosts,
@@ -798,6 +931,7 @@ function DashboardBody({
       ) : null}
 
       <LiveThroughputSection />
+      <FreeTokensSection />
       <TokenUsageSection />
       <ProviderLimitsSection
         data={data}

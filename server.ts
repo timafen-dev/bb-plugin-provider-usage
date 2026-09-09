@@ -2,6 +2,14 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { hostContract } from "./host-contract";
 import {
+  groupAgainstLimits,
+  parseAdminAccounts,
+  parseDailyLimits,
+  secondsUntilReset,
+  startOfUtcDay,
+  tokensByModel,
+} from "./lib/free-tokens";
+import {
   PROVIDER_KEYS,
   assembleDashboard,
   formatDashboardText,
@@ -244,6 +252,42 @@ export const rpcContract = defineRpcContract({
   getThroughput: {
     input: z.null(),
     output: throughputSnapshotSchema,
+  },
+});
+
+export const freeTokensContract = defineRpcContract({
+  freeTokens: {
+    input: z.object({ force: z.boolean().optional() }).strict(),
+    output: z
+      .object({
+        configured: z.boolean(),
+        secondsUntilReset: z.number(),
+        accounts: z.array(
+          z
+            .object({
+              label: z.string(),
+              error: z.string().nullable(),
+              groups: z.array(
+                z
+                  .object({
+                    label: z.string(),
+                    used: z.number(),
+                    limit: z.number(),
+                    remainingPercent: z.number(),
+                    models: z.array(
+                      z.object({ model: z.string(), tokens: z.number() }).strict(),
+                    ),
+                  })
+                  .strict(),
+              ),
+              unlimited: z.array(
+                z.object({ model: z.string(), tokens: z.number() }).strict(),
+              ),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
   },
 });
 
@@ -879,6 +923,101 @@ export default async function plugin(bb: BbPluginApi) {
   const tokens = createTokenStore(bb);
   const limits = createLimitStore(bb);
   const throughput = createThroughputStore(bb);
+
+  const freeTokenSettings = bb.settings.define({
+    openaiAdminKeys: {
+      type: "string",
+      secret: true,
+      label: "OpenAI admin keys",
+      description:
+        "One organization per line: `label = sk-admin-…`. An admin key is required; a project key is refused by the usage endpoint. Leave blank to hide the section.",
+      default: "",
+    },
+    openaiFreeDailyLimits: {
+      type: "string",
+      label: "Free daily token allowances",
+      description:
+        "One per line: `model-or-prefix = amount`, for example `gpt-5* = 1M`. OpenAI does not report the allowance anywhere in its API — copy the numbers from Settings → Limits in your dashboard.",
+      default: [
+        "gpt-5* = 1M",
+        "gpt-4.1 = 1M",
+        "gpt-4o = 1M",
+        "o1 = 1M",
+        "o3 = 1M",
+        "gpt-5-mini = 10M",
+        "gpt-5-nano = 10M",
+        "gpt-4.1-mini = 10M",
+        "gpt-4.1-nano = 10M",
+        "gpt-4o-mini = 10M",
+        "o3-mini = 10M",
+        "o4-mini = 10M",
+        "codex-mini* = 10M",
+      ].join("\n"),
+    },
+  });
+
+  /**
+   * Consumption comes from OpenAI; the allowance does not exist in any of its
+   * APIs, so it is configured. Both are needed to answer the only question
+   * worth asking — how much of today's free tier is left.
+   */
+  const readFreeTokens = async () => {
+    const { openaiAdminKeys, openaiFreeDailyLimits } =
+      await freeTokenSettings.get();
+    const accounts = parseAdminAccounts(openaiAdminKeys);
+    const limits = parseDailyLimits(openaiFreeDailyLimits);
+    const now = new Date();
+    if (accounts.length === 0) {
+      return { configured: false, secondsUntilReset: secondsUntilReset(now), accounts: [] };
+    }
+    const rows = await Promise.all(
+      accounts.map(async (account) => {
+        try {
+          const url = new URL("https://api.openai.com/v1/organization/usage/completions");
+          url.searchParams.set("start_time", String(startOfUtcDay(now)));
+          url.searchParams.set("bucket_width", "1d");
+          url.searchParams.append("group_by[]", "model");
+          url.searchParams.set("limit", "1");
+          const response = await fetch(url, {
+            headers: { Authorization: `Bearer ${account.key}` },
+            signal: AbortSignal.timeout(30_000),
+          });
+          if (!response.ok) {
+            // Never echo the body: it can name projects and keys.
+            bb.log.warn(`free tokens: ${account.label} answered HTTP ${response.status}`);
+            return {
+              label: account.label,
+              error:
+                response.status === 401
+                  ? "Key rejected. An organization admin key is required."
+                  : `OpenAI answered HTTP ${response.status}.`,
+              groups: [],
+              unlimited: [],
+            };
+          }
+          const { groups, unlimited } = groupAgainstLimits(
+            tokensByModel(await response.json()),
+            limits,
+          );
+          return { label: account.label, error: null, groups, unlimited };
+        } catch (cause) {
+          return {
+            label: account.label,
+            error: cause instanceof Error ? cause.message : String(cause),
+            groups: [],
+            unlimited: [],
+          };
+        }
+      }),
+    );
+    return { configured: true, secondsUntilReset: secondsUntilReset(now), accounts: rows };
+  };
+
+  bb.rpc.register(freeTokensContract, {
+    async freeTokens() {
+      return readFreeTokens();
+    },
+  });
 
   bb.rpc.register(rpcContract, {
     async getDashboard({ hostId, force }) {
