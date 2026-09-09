@@ -40,6 +40,27 @@ export interface LimitGroupRow {
 }
 
 /**
+ * Owner-confirmed complimentary allowances for one OpenAI organization.
+ * Model eligibility still comes from the configured patterns and must be
+ * checked against the organization's dashboard before a selector uses it.
+ */
+export const DEFAULT_OPENAI_FREE_DAILY_LIMITS = [
+  "gpt-5* = 250k",
+  "gpt-4.1 = 250k",
+  "gpt-4o = 250k",
+  "o1 = 250k",
+  "o3 = 250k",
+  "gpt-5-mini = 2.5M",
+  "gpt-5-nano = 2.5M",
+  "gpt-4.1-mini = 2.5M",
+  "gpt-4.1-nano = 2.5M",
+  "gpt-4o-mini = 2.5M",
+  "o3-mini = 2.5M",
+  "o4-mini = 2.5M",
+  "codex-mini* = 2.5M",
+].join("\n");
+
+/**
  * One account per line: `label = key`, or just the key. A line without a label
  * is named after the key's tail, so two accounts never look identical.
  */

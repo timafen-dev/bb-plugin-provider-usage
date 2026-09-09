@@ -1,9 +1,33 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 const {
+  DEFAULT_OPENAI_FREE_DAILY_LIMITS,
   groupAgainstLimits, limitFor, parseAdminAccounts, parseDailyLimits,
   parseTokenAmount, secondsUntilReset, startOfUtcDay, tokensByModel,
 } = await import("../lib/free-tokens.ts");
+
+test("defaults use the per-organization 250k and 2.5M allowances", () => {
+  const limits = parseDailyLimits(DEFAULT_OPENAI_FREE_DAILY_LIMITS);
+  assert.equal(limits.length, 13);
+  assert.deepEqual(
+    limits.map(({ pattern, tokens }) => [pattern, tokens]),
+    [
+      ["gpt-5*", 250_000],
+      ["gpt-4.1", 250_000],
+      ["gpt-4o", 250_000],
+      ["o1", 250_000],
+      ["o3", 250_000],
+      ["gpt-5-mini", 2_500_000],
+      ["gpt-5-nano", 2_500_000],
+      ["gpt-4.1-mini", 2_500_000],
+      ["gpt-4.1-nano", 2_500_000],
+      ["gpt-4o-mini", 2_500_000],
+      ["o3-mini", 2_500_000],
+      ["o4-mini", 2_500_000],
+      ["codex-mini*", 2_500_000],
+    ],
+  );
+});
 
 test("reads accounts one per line, labelled or not", () => {
   const accounts = parseAdminAccounts("Нус = sk-admin-aaa111\n\n# комментарий\nsk-admin-bbb222\n");

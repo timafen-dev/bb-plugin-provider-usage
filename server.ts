@@ -2,6 +2,7 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { hostContract } from "./host-contract";
 import {
+  DEFAULT_OPENAI_FREE_DAILY_LIMITS,
   groupAgainstLimits,
   parseAdminAccounts,
   parseDailyLimits,
@@ -937,22 +938,8 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Free daily token allowances",
       description:
-        "One per line: `model-or-prefix = amount`, for example `gpt-5* = 1M`. OpenAI does not report the allowance anywhere in its API — copy the numbers from Settings → Limits in your dashboard.",
-      default: [
-        "gpt-5* = 1M",
-        "gpt-4.1 = 1M",
-        "gpt-4o = 1M",
-        "o1 = 1M",
-        "o3 = 1M",
-        "gpt-5-mini = 10M",
-        "gpt-5-nano = 10M",
-        "gpt-4.1-mini = 10M",
-        "gpt-4.1-nano = 10M",
-        "gpt-4o-mini = 10M",
-        "o3-mini = 10M",
-        "o4-mini = 10M",
-        "codex-mini* = 10M",
-      ].join("\n"),
+        "One per line and per organization: `model-or-prefix = amount`, for example `gpt-5* = 250k`. OpenAI does not report the allowance anywhere in its API — copy the numbers and eligible models from Settings → Limits in your dashboard.",
+      default: DEFAULT_OPENAI_FREE_DAILY_LIMITS,
     },
   });
 
