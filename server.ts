@@ -320,7 +320,19 @@ function createLimitStore(bb: BbPluginApi) {
 
   let lastGood = readJson<LastGoodLimits>("last-good") ?? {};
   let lastFetch = readJson<LastFetch>("last-fetch");
-  let inflight: Promise<Record<ProviderKey, ProviderLimitSlice>> | null = null;
+  /**
+   * One entry per machine. A single shared slot was enough while the page
+   * showed one machine at a time; asking for several at once turned it into a
+   * hazard, because an in-flight request for one machine would be handed to
+   * another and report its numbers under the wrong name.
+   */
+  const fetchedByHost = new Map<string, LastFetch>();
+  const inflightByHost = new Map<
+    string,
+    Promise<Record<ProviderKey, ProviderLimitSlice>>
+  >();
+  const hostKey = (hostId: string | null) => hostId ?? "";
+  if (lastFetch) fetchedByHost.set(hostKey(lastFetch.hostId), lastFetch);
 
   const persist = () => {
     write.run("last-good", JSON.stringify(lastGood));
@@ -377,6 +389,7 @@ function createLimitStore(bb: BbPluginApi) {
       limits,
       rateLimitedAt: hasRateLimitedProvider(fresh) ? Date.now() : null,
     };
+    fetchedByHost.set(hostKey(hostId), lastFetch);
     persist();
     if (hasRateLimitedProvider(fresh)) {
       bb.log.warn(
@@ -387,25 +400,27 @@ function createLimitStore(bb: BbPluginApi) {
   };
 
   const get = async (hostId: string | null, force = false) => {
+    const key = hostKey(hostId);
+    const cached = fetchedByHost.get(key);
     if (
-      lastFetch &&
-      lastFetch.hostId === hostId &&
+      cached &&
       shouldReuseCachedLimits({
         nowMs: Date.now(),
-        fetchedAtMs: lastFetch.at,
-        rateLimitedAtMs: lastFetch.rateLimitedAt,
+        fetchedAtMs: cached.at,
+        rateLimitedAtMs: cached.rateLimitedAt,
         force,
       })
     ) {
-      return lastFetch.limits;
+      return cached.limits;
     }
-    if (inflight && !force) return inflight;
+    const running = inflightByHost.get(key);
+    if (running && !force) return running;
     const run = readLive(hostId);
-    inflight = run;
+    inflightByHost.set(key, run);
     try {
       return await run;
     } finally {
-      if (inflight === run) inflight = null;
+      if (inflightByHost.get(key) === run) inflightByHost.delete(key);
     }
   };
 

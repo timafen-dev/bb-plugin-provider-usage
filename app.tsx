@@ -911,11 +911,18 @@ function FreeTokensSection() {
   );
 }
 
-function DashboardBody({
+/**
+ * One machine's plan limits. Each instance loads its own machine, so the page
+ * shows every machine at once instead of making the owner switch between them
+ * to find out where a limit is running out.
+ */
+function MachineLimits({
   hostId,
+  name,
   onHosts,
 }: {
   hostId: string | null;
+  name: string | null;
   onHosts?: (hosts: DashboardSnapshot["hosts"]) => void;
 }) {
   const { data, error, loading, refreshing, reload } = useDashboard(hostId);
@@ -925,14 +932,13 @@ function DashboardBody({
   }, [data, onHosts]);
 
   return (
-    <div className="space-y-5">
-      {error && data ? (
-        <p className="text-xs text-destructive">Refresh failed: {error}</p>
+    <div className="space-y-2">
+      {name !== null ? (
+        <div className="px-1 text-sm font-medium">{name}</div>
       ) : null}
-
-      <LiveThroughputSection />
-      <FreeTokensSection />
-      <TokenUsageSection />
+      {error && data ? (
+        <p className="px-1 text-xs text-destructive">Refresh failed: {error}</p>
+      ) : null}
       <ProviderLimitsSection
         data={data}
         error={error}
@@ -945,31 +951,39 @@ function DashboardBody({
 }
 
 function DashboardPage() {
-  const [hostId, setHostId] = useState<string | null>(null);
+  // The first card doubles as the machine list; the rest follow from it.
   const [hosts, setHosts] = useState<DashboardSnapshot["hosts"]>([]);
+  const onHosts = useCallback((next: DashboardSnapshot["hosts"]) => {
+    setHosts((previous) =>
+      previous.length === next.length &&
+      previous.every((host, index) => host.id === next[index]?.id)
+        ? previous
+        : next,
+    );
+  }, []);
+
+  const connected = hosts.filter((host) => host.status !== "disconnected");
+  const shown = connected.length > 0 ? connected : hosts;
 
   return (
     <div className="h-full overflow-auto">
       <div className="mx-auto w-full max-w-6xl space-y-5 p-4 md:p-5">
-        {hosts.length > 1 ? (
-          <label className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Machine</span>
-            <select
-              className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
-              value={hostId ?? ""}
-              onChange={(event) => setHostId(event.target.value || null)}
-            >
-              <option value="">Primary</option>
-              {hosts.map((host) => (
-                <option key={host.id} value={host.id}>
-                  {host.name}
-                  {host.status === "disconnected" ? " (offline)" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        <DashboardBody hostId={hostId} onHosts={setHosts} />
+        <LiveThroughputSection />
+        <FreeTokensSection />
+        <TokenUsageSection />
+
+        {shown.length === 0 ? (
+          <MachineLimits hostId={null} name={null} onHosts={onHosts} />
+        ) : (
+          shown.map((host, index) => (
+            <MachineLimits
+              key={host.id}
+              hostId={host.id}
+              name={shown.length > 1 ? host.name : null}
+              onHosts={index === 0 ? onHosts : undefined}
+            />
+          ))
+        )}
       </div>
     </div>
   );
