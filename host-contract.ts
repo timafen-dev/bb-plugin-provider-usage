@@ -21,10 +21,47 @@ export const claudeMachineUsageSchema = z
   })
   .strict();
 
+const tokenBucketSchema = z
+  .object({
+    tokens: z.number(),
+    input: z.number(),
+    output: z.number(),
+    cached: z.number(),
+    reasoning: z.number(),
+    turns: z.number(),
+  })
+  .strict();
+
+export const machineTokensSchema = z
+  .object({
+    computer: z.string(),
+    scannedAt: z.string(),
+    changedFiles: z.number().int(),
+    slices: z.array(
+      z
+        .object({
+          provider: z.string(),
+          location: z.string(),
+          fileCount: z.number().int(),
+          daily: z.record(z.string(), tokenBucketSchema),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
 export const hostContract = defineRpcContract({
   /** The Claude login this machine actually uses, not the one in $HOME. */
   claudeUsage: {
     input: z.null(),
     output: claudeMachineUsageSchema,
+  },
+  /**
+   * This machine's own transcript history, as daily totals. The server can
+   * only read its own disk, and the agents run somewhere else.
+   */
+  tokenHistory: {
+    input: z.object({ force: z.boolean().optional() }).strict(),
+    output: machineTokensSchema,
   },
 });

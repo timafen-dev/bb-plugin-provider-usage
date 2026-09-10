@@ -366,7 +366,7 @@ function TokenUsageSection() {
         <div>
           <CardTitle className="text-base">Token usage</CardTitle>
           <p className="mt-1 text-xs text-muted-foreground">
-            Tracked token volume, including cached input, across sessions on this machine
+            Tracked token volume, including cached input, across sessions on every machine
           </p>
         </div>
         <div className="flex rounded-md border border-border p-0.5">
@@ -428,6 +428,29 @@ function TokenUsageSection() {
             ) : (
               <TokenChart snapshot={data} />
             )}
+            {data.machines && data.machines.length > 0 ? (
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                {data.machines.map((machine) => (
+                  <span
+                    key={machine.id}
+                    className="inline-flex items-center gap-1.5"
+                    title={machine.message ?? undefined}
+                  >
+                    <span className="text-muted-foreground">{machine.name}</span>
+                    <span className="tabular-nums text-foreground">
+                      {machine.status === "error"
+                        ? "—"
+                        : formatTokenCount(machine.tokens)}
+                    </span>
+                    {machine.status !== "ok" ? (
+                      <span className="text-muted-foreground/70">
+                        {machine.status === "stale" ? "last known" : "no answer"}
+                      </span>
+                    ) : null}
+                  </span>
+                ))}
+              </div>
+            ) : null}
             <p className="text-xs text-muted-foreground">
               {data.fileCount} session files
               {data.changedFiles > 0 ? ` · ${data.changedFiles} updated` : ""}

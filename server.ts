@@ -1,6 +1,12 @@
+import { hostname } from "node:os";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { hostContract } from "./host-contract";
+import {
+  mergeMachineTokens,
+  slicesFromScan,
+  type MachineTokenSource,
+} from "./lib/machine-tokens";
 import {
   groupAgainstLimits,
   parseAdminAccounts,
@@ -190,6 +196,17 @@ const tokenSnapshotSchema = z.object({
       byProvider: z.record(z.string(), z.number()),
     }),
   ),
+  machines: z
+    .array(
+      z.object({
+        id: z.string(),
+        name: z.string(),
+        status: z.enum(["ok", "stale", "error"]),
+        tokens: z.number(),
+        message: z.string().nullable(),
+      }),
+    )
+    .optional(),
 });
 
 const throughputSnapshotSchema = z.object({
@@ -544,6 +561,12 @@ function isPersistedTokenFile(value: unknown): value is PersistedTokenFile {
   return row.version === 2 && !!row.daily && typeof row.daily === "object";
 }
 
+/**
+ * A machine answers within its own 20s budget once it has scanned before; the
+ * first scan of a busy machine runs on after this and is picked up next time.
+ */
+const REMOTE_TIMEOUT_MS = 45_000;
+
 function createTokenStore(bb: BbPluginApi) {
   const db = bb.storage.database();
   bb.storage.migrate(db, [
@@ -650,22 +673,112 @@ function createTokenStore(bb: BbPluginApi) {
     tx(files);
   };
 
+  /**
+   * The agents run on the machines, not beside the server, so the server's own
+   * disk usually holds none of their transcripts. Each machine reads its own
+   * and sends back daily totals; the last answer is kept so a machine that is
+   * offline or slow still counts with what it last reported.
+   */
+  const tokenHosts = bb.hosts.experimental_client({ contract: hostContract });
+  let remote: MachineTokenSource[] =
+    (() => {
+      const raw = (readMeta.get("remote-machines") as { value?: string } | undefined)
+        ?.value;
+      try {
+        return raw ? (JSON.parse(raw) as MachineTokenSource[]) : [];
+      } catch {
+        return [];
+      }
+    })();
+  let bbUsageDaily: Record<string, Record<string, TokenBucket>> = {};
+  let bbUsageProviders: string[] = [];
+
+  const readRemote = async (force: boolean) => {
+    const previous = new Map(remote.map((source) => [source.id, source]));
+    const hosts = await bb.sdk.hosts.list();
+    remote = await Promise.all(
+      hosts.map(async (host): Promise<MachineTokenSource> => {
+        const kept = previous.get(host.id)?.tokens ?? null;
+        if (host.status !== "connected") {
+          return { id: host.id, name: host.name, tokens: kept, error: "Machine is offline." };
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const tokens = await Promise.race([
+            tokenHosts.call("tokenHistory", { force }, { hostId: host.id }),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("Machine did not answer in time.")),
+                REMOTE_TIMEOUT_MS,
+              );
+            }),
+          ]);
+          return { id: host.id, name: host.name, tokens, error: null };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          bb.log.warn(`token history from ${host.name}: ${message}`);
+          return { id: host.id, name: host.name, tokens: kept, error: message };
+        } finally {
+          clearTimeout(timer);
+        }
+      }),
+    );
+    writeMeta.run("remote-machines", JSON.stringify(remote));
+  };
+
+  const combine = (
+    days: TokenWindowDays,
+    local: {
+      files: FileScanResult[];
+      changedFiles: number;
+      daily: Record<string, Record<string, TokenBucket>>;
+    },
+  ): TokenSnapshot => {
+    // Machines first: a location both a machine and the server can see is
+    // credited to the machine.
+    const merged = mergeMachineTokens(
+      [
+        ...remote,
+        {
+          id: "server",
+          name: "BB server",
+          error: null,
+          tokens: {
+            computer: hostname(),
+            scannedAt: new Date().toISOString(),
+            changedFiles: local.changedFiles,
+            slices: slicesFromScan(local),
+          },
+        },
+      ],
+      days,
+    );
+    mergeDaily(merged.daily, bbUsageDaily);
+    const snapshot = assembleTokenSnapshot({
+      days,
+      fileCount: merged.fileCount,
+      changedFiles: merged.changedFiles,
+      sources: [...new Set([...merged.providers, ...bbUsageProviders])],
+      daily: merged.daily,
+    });
+    // A machine that answered with nothing in the window is only noise.
+    return {
+      ...snapshot,
+      machines: merged.machines.filter(
+        (row) => row.status !== "ok" || row.tokens > 0,
+      ),
+    };
+  };
+
   const snapshotFrom = (
     days: TokenWindowDays,
     scanned: {
       files: FileScanResult[];
       changedFiles: number;
-      sources: string[];
       daily: Record<string, Record<string, TokenBucket>>;
     },
   ) => {
-    const snapshot = assembleTokenSnapshot({
-      days,
-      fileCount: scanned.files.length,
-      changedFiles: scanned.changedFiles,
-      sources: scanned.sources,
-      daily: scanned.daily,
-    });
+    const snapshot = combine(days, scanned);
     lastSnapshot = snapshot;
     writeMeta.run("last-scan", snapshot.scannedAt);
     return snapshot;
@@ -749,20 +862,30 @@ function createTokenStore(bb: BbPluginApi) {
       );
 
       const phase2Started = Date.now();
-      const full = await scanTokenFiles({
-        cached: loadCache,
-        includeCursor: true,
-        includeOpencode: true,
-      });
+      const [full] = await Promise.all([
+        scanTokenFiles({
+          cached: loadCache,
+          includeCursor: true,
+          includeOpencode: true,
+        }),
+        readRemote(force).catch((error) =>
+          bb.log.warn(
+            `token history from machines: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        ),
+      ]);
       persistFiles(full.files);
       const bbUsage = await scanBbThreads(nowMs);
-      mergeDaily(full.daily, bbUsage.daily);
-      full.sources.push(...bbUsage.providers);
+      bbUsageDaily = bbUsage.daily;
+      bbUsageProviders = bbUsage.providers;
       bb.log.info(
         `token scan phase2 ${Date.now() - phase2Started}ms ` +
           `changed=${full.changedFiles} ` +
           `bbThreads=${bbUsage.threadsScanned} ` +
-          `providers [${bbUsage.providers.join(", ") || "none"}]`,
+          `providers [${bbUsage.providers.join(", ") || "none"}] ` +
+          `machines [${remote
+            .map((source) => `${source.name}${source.error ? " (stale)" : ""}`)
+            .join(", ")}]`,
       );
       const snapshot = snapshotFrom(days, full);
       publish();
@@ -783,13 +906,7 @@ function createTokenStore(bb: BbPluginApi) {
           includeOpencode: hasOpencodeCache(),
         });
         paintCachedStores(scanned);
-        return assembleTokenSnapshot({
-          days,
-          fileCount: scanned.files.length,
-          changedFiles: scanned.changedFiles,
-          sources: scanned.sources,
-          daily: scanned.daily,
-        });
+        return combine(days, scanned);
       }
       if (!inflight) {
         const lastScan = (

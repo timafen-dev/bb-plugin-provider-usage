@@ -43,6 +43,17 @@ export interface TokenSnapshot {
   totals: TokenBucket;
   providers: TokenProviderRow[];
   series: TokenDay[];
+  /** What each machine contributed; absent when only this disk was read. */
+  machines?: TokenMachineRow[];
+}
+
+export interface TokenMachineRow {
+  id: string;
+  name: string;
+  /** `stale`: the machine did not answer, so its last answer was used. */
+  status: "ok" | "stale" | "error";
+  tokens: number;
+  message: string | null;
 }
 
 export const EMPTY_BUCKET: TokenBucket = {
@@ -209,6 +220,16 @@ export function formatTokenText(snapshot: TokenSnapshot): string {
     for (const provider of snapshot.providers) {
       lines.push(
         `  ${provider.displayName.padEnd(14)} ${formatTokenCount(provider.tokens).padStart(7)}  ${Math.round(provider.percent)}%  ${formatTokenCount(provider.input)} in / ${formatTokenCount(provider.output)} out`,
+      );
+    }
+  }
+  if (snapshot.machines && snapshot.machines.length > 0) {
+    lines.push("", "By machine");
+    for (const machine of snapshot.machines) {
+      const note =
+        machine.status === "ok" ? "" : `  (${machine.message ?? machine.status})`;
+      lines.push(
+        `  ${machine.name.padEnd(30)} ${(machine.status === "error" ? "—" : formatTokenCount(machine.tokens)).padStart(7)}${note}`,
       );
     }
   }

@@ -15,6 +15,9 @@ import {
   windowsFromUsage,
   type ClaudeMachineUsage,
 } from "./lib/claude-machine.js";
+import { createHostTokenHistory } from "./lib/host-token-history.js";
+
+let tokenHistory: ReturnType<typeof createHostTokenHistory> | null = null;
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const TIMEOUT_MS = 20_000;
@@ -111,6 +114,15 @@ export default experimental_defineHostEntry({
           message: cause instanceof Error ? cause.message : String(cause),
         };
       }
+    },
+    tokenHistory: async ({ force }, context) => {
+      tokenHistory ??= createHostTokenHistory({
+        dataDir: context.experimental_paths.dataDir,
+      });
+      return tokenHistory.read({
+        force: force === true,
+        retain: () => context.experimental_retainWorker(),
+      });
     },
   },
 });
