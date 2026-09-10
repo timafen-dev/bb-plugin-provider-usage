@@ -19,6 +19,12 @@ import {
   type UsageHost,
 } from "./lib/dashboard";
 import {
+  hiddenProvidersFor,
+  isMachineHidden,
+  parsePanelHidden,
+  type PanelHidden,
+} from "./lib/panel-hidden";
+import {
   scanTokenFiles,
   seedDailyFromCache,
   type FileCacheEntry,
@@ -432,14 +438,18 @@ async function loadDashboard(
   hostId: string | null,
   limitsStore: { get: (hostId: string | null, force?: boolean) => Promise<Record<ProviderKey, ProviderLimitSlice>> },
   force = false,
+  hidden: PanelHidden = { machines: new Set(), providers: new Map() },
 ): Promise<DashboardSnapshot> {
-  const hosts = (await bb.sdk.hosts.list()).map(
+  const everyHost = (await bb.sdk.hosts.list()).map(
     (host): UsageHost => ({
       id: host.id,
       name: host.name,
       status: host.status,
     }),
   );
+  // Hidden machines go before anything else: the panel walks this list to
+  // decide which sections to draw, so a machine left in it is a section.
+  const hosts = everyHost.filter((host) => !isMachineHidden(hidden, host));
   const resolvedHostId =
     hostId && hosts.some((host) => host.id === hostId) ? hostId : null;
   const [slices, catalog] = await Promise.all([
@@ -452,13 +462,26 @@ async function loadDashboard(
       ? await readCodexUsageSupplement()
       : null;
 
-  return assembleDashboard({
+  const snapshot = assembleDashboard({
     limits: slices,
     supplements: codexSupplement ? { codex: codexSupplement } : undefined,
     hosts,
     catalog,
     hostId: resolvedHostId,
   });
+  const omitted = hiddenProvidersFor(
+    hidden,
+    hosts.find((host) => host.id === resolvedHostId) ?? null,
+  );
+  if (omitted.size === 0) return snapshot;
+  return {
+    ...snapshot,
+    providers: snapshot.providers.filter(
+      (provider) =>
+        !omitted.has(provider.id.toLowerCase()) &&
+        !omitted.has(provider.key.toLowerCase()),
+    ),
+  };
 }
 
 function isTokenWindow(value: number): value is TokenWindowDays {
@@ -939,6 +962,18 @@ export default async function plugin(bb: BbPluginApi) {
   const limits = createLimitStore(bb);
   const throughput = createThroughputStore(bb);
 
+  const panelSettings = bb.settings.define({
+    panelHidden: {
+      type: "string",
+      label: "Rows the panel leaves out",
+      description:
+        "One rule per line. `Machine` hides that machine entirely; `Machine: claude-code, cursor` hides those providers on it; `*: muse` hides a provider everywhere. Name a machine by its display name or its id — the id survives a rename. Provider ids: codex, claude-code, cursor, muse. A row that will never have a subscription to report is noise, and it pushes the rows that matter off the screen.",
+      default: "",
+    },
+  });
+  const readHidden = async (): Promise<PanelHidden> =>
+    parsePanelHidden((await panelSettings.get()).panelHidden);
+
   const freeTokenSettings = bb.settings.define({
     openaiAdminKeys: {
       type: "string",
@@ -1028,7 +1063,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.rpc.register(rpcContract, {
     async getDashboard({ hostId, force }) {
-      return loadDashboard(bb, hostId, limits, force === true);
+      return loadDashboard(bb, hostId, limits, force === true, await readHidden());
     },
     async getTokens({ days, force }) {
       return tokens.get(days, force === true);
@@ -1188,7 +1223,7 @@ export default async function plugin(bb: BbPluginApi) {
         resolvedHostId = match.id;
       }
 
-      const snapshot = await loadDashboard(bb, resolvedHostId, limits, force);
+      const snapshot = await loadDashboard(bb, resolvedHostId, limits, force, await readHidden());
       const tokenSnapshot = await tokens.get(days, force);
       if (json) {
         return {
