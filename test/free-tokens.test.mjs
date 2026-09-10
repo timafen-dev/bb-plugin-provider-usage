@@ -24,20 +24,29 @@ test("understands the shorthand people actually type for amounts", () => {
   assert.equal(parseTokenAmount("нисколько"), null);
 });
 
-test("limits are read from lines or a comma-separated list", () => {
-  const limits = parseDailyLimits("gpt-5* = 1M\ngpt-4.1-mini = 2M, o3-mini=10M");
-  assert.deepEqual(limits.map((l) => [l.pattern, l.tokens]), [
-    ["gpt-5*", 1_000_000],
-    ["gpt-4.1-mini", 2_000_000],
-    ["o3-mini", 10_000_000],
+test("a line is one allowance shared by every model on it", () => {
+  const limits = parseDailyLimits("Крупные: gpt-5*, gpt-4.1*, o3* = 250k\nМелкие: gpt-5-mini*, o4-mini* = 2.5M");
+  assert.deepEqual(limits.map((l) => [l.label, l.patterns.length, l.tokens]), [
+    ["Крупные", 3, 250_000],
+    ["Мелкие", 2, 2_500_000],
   ]);
 });
 
-test("the most specific rule wins, so an exact model beats a prefix", () => {
-  const limits = parseDailyLimits("gpt-5* = 1M\ngpt-5-mini = 10M");
-  assert.equal(limitFor("gpt-5-mini", limits)?.tokens, 10_000_000);
-  assert.equal(limitFor("gpt-5-codex", limits)?.tokens, 1_000_000);
+test("without a name the models name the row themselves", () => {
+  const [limit] = parseDailyLimits("gpt-5*, gpt-4.1* = 250k");
+  assert.equal(limit.label, "gpt-5*, gpt-4.1*");
+});
+
+test("the most specific pattern wins, across groups", () => {
+  const limits = parseDailyLimits("Крупные: gpt-5*, gpt-4.1* = 250k\nМелкие: gpt-4.1-mini* = 2.5M");
+  assert.equal(limitFor("gpt-4.1-mini-2025-04-14", limits)?.tokens, 2_500_000);
+  assert.equal(limitFor("gpt-4.1-2025-04-14", limits)?.tokens, 250_000);
   assert.equal(limitFor("claude-opus", limits), null);
+});
+
+test("a dated model id still lands in its group", () => {
+  const limits = parseDailyLimits("Крупные: o3* = 250k");
+  assert.equal(limitFor("o3-2025-04-16", limits)?.tokens, 250_000);
 });
 
 test("sums input and output tokens per model across buckets", () => {
@@ -63,7 +72,7 @@ test("a shape that is not the usage answer yields nothing instead of throwing", 
 });
 
 test("groups usage under its allowance and reports what is left", () => {
-  const limits = parseDailyLimits("gpt-5* = 1M\ngpt-5-mini = 10M");
+  const limits = parseDailyLimits("Крупные: gpt-5* = 1M\nМелкие: gpt-5-mini = 10M");
   const { groups, unlimited } = groupAgainstLimits(
     [
       { model: "gpt-5", tokens: 250_000 },
@@ -73,23 +82,23 @@ test("groups usage under its allowance and reports what is left", () => {
     ],
     limits,
   );
-  const big = groups.find((g) => g.label === "gpt-5*");
+  const big = groups.find((g) => g.label === "Крупные");
   assert.equal(big?.used, 500_000);
   assert.equal(big?.remainingPercent, 50);
-  assert.equal(groups.find((g) => g.label === "gpt-5-mini")?.remainingPercent, 90);
+  assert.equal(groups.find((g) => g.label === "Мелкие")?.remainingPercent, 90);
   // Spend with no allowance is still shown, not silently dropped.
   assert.deepEqual(unlimited, [{ model: "some-other-model", tokens: 42 }]);
 });
 
 test("an allowance with no spend today is still listed, at full", () => {
-  const { groups } = groupAgainstLimits([], parseDailyLimits("gpt-5* = 1M"));
-  assert.deepEqual(groups.map((g) => [g.label, g.used, g.remainingPercent]), [["gpt-5*", 0, 100]]);
+  const { groups } = groupAgainstLimits([], parseDailyLimits("Крупные: gpt-5* = 1M"));
+  assert.deepEqual(groups.map((g) => [g.label, g.used, g.remainingPercent]), [["Крупные", 0, 100]]);
 });
 
 test("going over the allowance clamps at nothing left, not a negative", () => {
   const { groups } = groupAgainstLimits(
     [{ model: "gpt-5", tokens: 3_000_000 }],
-    parseDailyLimits("gpt-5* = 1M"),
+    parseDailyLimits("Крупные: gpt-5* = 1M"),
   );
   assert.equal(groups[0].remainingPercent, 0);
   assert.equal(groups[0].used, 3_000_000);
@@ -99,4 +108,19 @@ test("the day is OpenAI's, which starts at midnight UTC", () => {
   const noonUtc = new Date("2026-09-09T12:00:00Z");
   assert.equal(startOfUtcDay(noonUtc), Math.floor(Date.parse("2026-09-09T00:00:00Z") / 1000));
   assert.equal(secondsUntilReset(noonUtc), 12 * 3600);
+});
+
+test("models in one group share a single pool, not one each", () => {
+  const limits = parseDailyLimits("Крупные: gpt-5*, gpt-4.1*, o3* = 250k");
+  const { groups } = groupAgainstLimits(
+    [
+      { model: "gpt-5", tokens: 100_000 },
+      { model: "gpt-4.1-2025-04-14", tokens: 100_000 },
+      { model: "o3-2025-04-16", tokens: 50_000 },
+    ],
+    limits,
+  );
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].used, 250_000);
+  assert.equal(groups[0].remainingPercent, 0);
 });

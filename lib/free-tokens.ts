@@ -21,8 +21,15 @@ export interface AdminAccount {
 }
 
 export interface DailyLimit {
-  /** Model id, or a prefix ending in `*`. */
-  pattern: string;
+  /** What to call this allowance on screen. */
+  label: string;
+  /** Model ids, or prefixes ending in `*`. */
+  patterns: string[];
+  /**
+   * The allowance shared by every model in the group. OpenAI grants one pool
+   * per group — not one per model — so a group of five models with a 250k
+   * allowance has 250k between them, not 1.25M.
+   */
   tokens: number;
 }
 
@@ -60,18 +67,43 @@ export function parseAdminAccounts(raw: string): AdminAccount[] {
   return accounts;
 }
 
-/** One limit per line: `pattern = number`. `5M` and `250k` are accepted. */
+/**
+ * One allowance per line:
+ *
+ *   `Label: pattern, pattern, … = amount`
+ *
+ * The label is optional; without it the patterns themselves name the row.
+ * `5M` and `250k` are accepted for the amount. Commas separate models inside a
+ * group, so lines are the only separator between groups.
+ */
 export function parseDailyLimits(raw: string): DailyLimit[] {
   const limits: DailyLimit[] = [];
-  for (const line of raw.split(/[\r\n,]+/u)) {
+  for (const line of raw.split(/[\r\n]+/u)) {
     const trimmed = line.trim();
     if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
     const split = trimmed.lastIndexOf("=");
     if (split <= 0) continue;
-    const pattern = trimmed.slice(0, split).trim();
     const amount = parseTokenAmount(trimmed.slice(split + 1).trim());
-    if (pattern.length === 0 || amount === null) continue;
-    limits.push({ pattern, tokens: amount });
+    if (amount === null) continue;
+    let head = trimmed.slice(0, split).trim();
+    let label = "";
+    // A colon separates a name from the models, but model ids never contain
+    // one, so this cannot swallow part of a pattern.
+    const colon = head.indexOf(":");
+    if (colon > 0) {
+      label = head.slice(0, colon).trim();
+      head = head.slice(colon + 1).trim();
+    }
+    const patterns = head
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    if (patterns.length === 0) continue;
+    limits.push({
+      label: label.length > 0 ? label : patterns.join(", "),
+      patterns,
+      tokens: amount,
+    });
   }
   return limits;
 }
@@ -85,16 +117,29 @@ export function parseTokenAmount(raw: string): number | null {
   return Math.round(base * scale);
 }
 
-/** The most specific matching rule wins, so an exact model beats a prefix. */
+function matchLength(model: string, pattern: string): number {
+  if (pattern.endsWith("*")) {
+    const head = pattern.slice(0, -1);
+    return model.startsWith(head) ? head.length : -1;
+  }
+  return model === pattern ? pattern.length : -1;
+}
+
+/**
+ * The most specific matching pattern wins, so `gpt-4.1-mini*` claims a mini
+ * model even when `gpt-4.1*` would also match it.
+ */
 export function limitFor(model: string, limits: DailyLimit[]): DailyLimit | null {
   let best: DailyLimit | null = null;
+  let bestLength = -1;
   for (const limit of limits) {
-    const isPrefix = limit.pattern.endsWith("*");
-    const matches = isPrefix
-      ? model.startsWith(limit.pattern.slice(0, -1))
-      : model === limit.pattern;
-    if (!matches) continue;
-    if (best === null || limit.pattern.length > best.pattern.length) best = limit;
+    for (const pattern of limit.patterns) {
+      const length = matchLength(model, pattern);
+      if (length > bestLength) {
+        bestLength = length;
+        best = limit;
+      }
+    }
   }
   return best;
 }
@@ -146,10 +191,10 @@ export function groupAgainstLimits(
       unlimited.push(row);
       continue;
     }
-    const existing = groups.get(limit.pattern);
+    const existing = groups.get(limit.label);
     if (existing === undefined) {
-      groups.set(limit.pattern, {
-        label: limit.pattern,
+      groups.set(limit.label, {
+        label: limit.label,
         used: row.tokens,
         limit: limit.tokens,
         remainingPercent: 0,
@@ -163,9 +208,9 @@ export function groupAgainstLimits(
   // A group with a configured allowance is worth showing even at zero: that is
   // the whole point of a counter meant to keep you inside the free tier.
   for (const limit of limits) {
-    if (!groups.has(limit.pattern)) {
-      groups.set(limit.pattern, {
-        label: limit.pattern,
+    if (!groups.has(limit.label)) {
+      groups.set(limit.label, {
+        label: limit.label,
         used: 0,
         limit: limit.tokens,
         remainingPercent: 100,

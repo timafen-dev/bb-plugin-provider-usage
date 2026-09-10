@@ -952,21 +952,13 @@ export default async function plugin(bb: BbPluginApi) {
       type: "string",
       label: "Free daily token allowances",
       description:
-        "One per line: `model-or-prefix = amount`, for example `gpt-5* = 1M`. OpenAI does not report the allowance anywhere in its API — copy the numbers from Settings → Limits in your dashboard.",
+        "One allowance per line: `Name: model, model, … = amount`. Every model on a line shares that one allowance, which is how OpenAI grants it — a group is not an allowance each. A trailing `*` matches a prefix, so dated model ids are covered. OpenAI does not report the allowance anywhere in its API; copy the numbers from Settings → Limits in your dashboard.",
       default: [
-        "gpt-5* = 1M",
-        "gpt-4.1 = 1M",
-        "gpt-4o = 1M",
-        "o1 = 1M",
-        "o3 = 1M",
-        "gpt-5-mini = 10M",
-        "gpt-5-nano = 10M",
-        "gpt-4.1-mini = 10M",
-        "gpt-4.1-nano = 10M",
-        "gpt-4o-mini = 10M",
-        "o3-mini = 10M",
-        "o4-mini = 10M",
-        "codex-mini* = 10M",
+        // One pool per group, not one per model: OpenAI grants the allowance
+        // across the whole group. Tier 1–2 gets 250k and 2.5M; higher tiers
+        // get 1M and 10M. Copy the numbers from Settings → Limits.
+        "Крупные модели: gpt-5*, gpt-4.1*, gpt-4o*, o1*, o3* = 250k",
+        "Мелкие модели: gpt-5-mini*, gpt-5-nano*, gpt-4.1-mini*, gpt-4.1-nano*, gpt-4o-mini*, o3-mini*, o4-mini*, codex-mini* = 2.5M",
       ].join("\n"),
     },
   });
