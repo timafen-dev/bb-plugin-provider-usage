@@ -463,9 +463,9 @@ export function LiveThroughputSection() {
                   hint={`${data.windowTotals.turns} turn${data.windowTotals.turns === 1 ? "" : "s"}`}
                 />
                 <StatCell
-                  label="Working"
-                  value={`${data.activeThreads}`}
-                  hint={`of ${data.trackedThreads} thread${data.trackedThreads === 1 ? "" : "s"}`}
+                  label={`${windowMinutes}m threads`}
+                  value={`${data.windowThreads}`}
+                  hint="reported tokens"
                 />
               </div>
             </div>

@@ -17,9 +17,6 @@ export const THROUGHPUT_WINDOW_MS = 15 * 60_000;
 export const THROUGHPUT_BIN_MS = 10_000;
 /** The trailing window the headline rate is measured over. */
 export const RATE_WINDOW_MS = 60_000;
-/** A thread with nothing newer than this is no longer "working". */
-export const ACTIVE_THREAD_MS = 90_000;
-
 /** One provider's share of one turn, at the moment the turn reported it. */
 export interface ThroughputDelta {
   atMs: number;
@@ -73,7 +70,8 @@ export interface ThroughputSnapshot {
   peakTokensPerMinute: number;
   peakAtMs: number | null;
   windowTotals: TokenBucket;
-  activeThreads: number;
+  /** Threads that reported tokens inside the same window as windowTotals. */
+  windowThreads: number;
   trackedThreads: number;
   live: boolean;
   providers: ThroughputProviderRow[];
@@ -262,10 +260,6 @@ export function assembleThroughputSnapshot(input: {
     })
     .sort((a, b) => b.tokens - a.tokens || a.threadId.localeCompare(b.threadId));
 
-  const activeThreads = threads.filter(
-    (thread) => thread.lastAtMs > nowMs - ACTIVE_THREAD_MS,
-  ).length;
-
   return {
     sampledAt: new Date(nowMs).toISOString(),
     nowMs,
@@ -276,7 +270,7 @@ export function assembleThroughputSnapshot(input: {
     peakTokensPerMinute,
     peakAtMs,
     windowTotals,
-    activeThreads,
+    windowThreads: threads.length,
     trackedThreads: input.trackedThreads ?? threadMeta.size,
     live: tokensPerMinute > 0,
     providers,
@@ -357,7 +351,7 @@ export function formatThroughputText(snapshot: ThroughputSnapshot): string {
     `  Now               ${formatRate(snapshot.tokensPerMinute)}`,
     `  Peak              ${formatRate(snapshot.peakTokensPerMinute)}`,
     `  Window total      ${formatTokenCount(snapshot.windowTotals.tokens)} over ${snapshot.windowTotals.turns} turn${snapshot.windowTotals.turns === 1 ? "" : "s"}`,
-    `  Threads working   ${snapshot.activeThreads} of ${snapshot.trackedThreads} tracked`,
+    `  ${minutes}m threads       ${snapshot.windowThreads} reported tokens`,
     "",
     "By provider",
   ];
