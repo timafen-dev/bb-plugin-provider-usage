@@ -19,6 +19,7 @@ registerHooks({
 const {
   assembleThroughputSnapshot,
   createThroughputRecorder,
+  formatThroughputText,
   THROUGHPUT_BIN_MS,
   THROUGHPUT_WINDOW_MS,
 } = await import("../lib/throughput.ts");
@@ -139,7 +140,7 @@ test("series are ordered by palette seat, not by volume", () => {
   assert.ok(providerSlotIndex("claude-code") < providerSlotIndex("codex"));
 });
 
-test("thread rows carry the title and mark recent work as active", () => {
+test("thread rows carry the title", () => {
   const snapshot = assembleThroughputSnapshot({
     nowMs: NOW,
     deltas: [
@@ -157,11 +158,40 @@ test("thread rows carry the title and mark recent work as active", () => {
   });
 
   assert.equal(snapshot.threads.length, 2);
-  assert.equal(snapshot.activeThreads, 1);
   const live = snapshot.threads.find((row) => row.threadId === "thr_live");
   assert.equal(live.title, "Ship the update");
   const old = snapshot.threads.find((row) => row.threadId === "thr_old");
   assert.equal(old.title, "Untitled thread");
+});
+
+test("finished turns remain counted as threads for the full throughput window", () => {
+  const snapshot = assembleThroughputSnapshot({
+    nowMs: NOW,
+    deltas: [
+      delta(NOW - 2 * 60_000, "codex", 500, "thr_finished_1"),
+      delta(NOW - 10 * 60_000, "codex", 800, "thr_finished_2"),
+    ],
+    threads: [
+      {
+        threadId: "thr_finished_1",
+        providerId: "codex",
+        title: "Finished one",
+        status: "idle",
+      },
+      {
+        threadId: "thr_finished_2",
+        providerId: "codex",
+        title: "Finished two",
+        status: "idle",
+      },
+    ],
+  });
+
+  assert.equal(snapshot.windowThreads, 2);
+  assert.match(
+    formatThroughputText(snapshot),
+    /15m threads\s+2 reported tokens/,
+  );
 });
 
 function scannerHarness(events, thread = {}) {

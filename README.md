@@ -10,10 +10,11 @@ signed in to, on every machine BB knows about.
 
 **Live throughput.** A 15-minute chart of tokens as they are reported, binned
 per 10 seconds and stacked by provider, with the current rate over the trailing
-60 seconds, the best rate seen in the window, and the threads doing the work. It
-updates every couple of seconds while a turn is running and settles when the
-machine goes quiet. Archived and deleted threads drop out immediately — they
-are history, not current burn. BB's token events are authoritative; for
+60 seconds, the best rate seen in the window, and the number of threads that
+reported tokens in that same 15-minute window. It updates every couple of
+seconds while a turn is running and settles when the machine goes quiet.
+Archived and deleted threads drop out immediately — they are history, not
+current burn. BB's token events are authoritative; for
 BB-launched ACP sessions whose bridges do not emit them, the plugin maps the
 provider thread id back to opencode's exact local counters or Cursor's
 text-derived estimate.

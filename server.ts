@@ -196,7 +196,7 @@ const throughputSnapshotSchema = z.object({
   peakTokensPerMinute: z.number(),
   peakAtMs: z.number().nullable(),
   windowTotals: tokenBucketSchema,
-  activeThreads: z.number().int(),
+  windowThreads: z.number().int(),
   trackedThreads: z.number().int(),
   live: z.boolean(),
   providers: z.array(
@@ -1099,7 +1099,7 @@ export default async function plugin(bb: BbPluginApi) {
           const snapshot = await throughput.refresh();
           // Publish only on change: an idle machine should not wake every
           // connected client every two seconds.
-          const signature = `${snapshot.windowTotals.tokens}:${snapshot.windowTotals.turns}:${snapshot.activeThreads}`;
+          const signature = `${snapshot.windowTotals.tokens}:${snapshot.windowTotals.turns}:${snapshot.windowThreads}`;
           if (signature !== previous) {
             previous = signature;
             bb.realtime.publish("throughput", { at: snapshot.nowMs });
