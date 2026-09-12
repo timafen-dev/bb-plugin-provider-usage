@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import test from "node:test";
 import { tmpdir } from "node:os";
@@ -311,6 +311,7 @@ test("transcript scan uses Codex cumulative totals and Claude message ids", asyn
   process.env.CLAUDE_CONFIG_DIR = claudeHome;
   try {
     const result = await scanTokenFiles({
+      home: root,
       includeCursor: false,
       includeOpencode: false,
     });
@@ -325,6 +326,88 @@ test("transcript scan uses Codex cumulative totals and Claude message ids", asyn
     if (priorClaudeHome === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = priorClaudeHome;
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("machine scan counts every account root once and proves the negative pair", async () => {
+  const home = await mkdtemp(join(tmpdir(), "provider-usage-accounts-"));
+  const ordinary = join(home, ".codex", "sessions");
+  const accountTwo = join(home, ".bb-accounts", "2");
+  const accountTwoSessions = join(accountTwo, "codex", "sessions");
+  const apiClaude = join(home, ".bb-accounts", "api", "claude");
+  const apiProject = join(apiClaude, "projects", "project");
+  await mkdir(ordinary, { recursive: true });
+  await mkdir(accountTwoSessions, { recursive: true });
+  await mkdir(apiProject, { recursive: true });
+  const timestamp = new Date().toISOString();
+  const codexRecord = (tokens) =>
+    JSON.stringify({
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          total_token_usage: {
+            total_tokens: tokens,
+            input_tokens: tokens,
+            cached_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+          },
+        },
+      },
+    });
+  const claudeRecord = JSON.stringify({
+    timestamp,
+    type: "assistant",
+    message: {
+      id: "api-account-message",
+      usage: { input_tokens: 0, output_tokens: 300 },
+    },
+  });
+  await writeFile(join(ordinary, "ordinary.jsonl"), `${codexRecord(100)}\n`);
+  await writeFile(
+    join(accountTwoSessions, "account.jsonl"),
+    `${codexRecord(200)}\n`,
+  );
+  await writeFile(join(apiProject, "account.jsonl"), `${claudeRecord}\n`);
+
+  const options = {
+    home,
+    env: {
+      CODEX_HOME: join(accountTwo, "codex"),
+      CLAUDE_CONFIG_DIR: apiClaude,
+    },
+    includeCursor: false,
+    includeOpencode: false,
+  };
+  const total = (result) =>
+    Object.values(result.daily).reduce(
+      (sum, providers) =>
+        sum +
+        Object.values(providers).reduce(
+          (providerSum, bucket) => providerSum + bucket.tokens,
+          0,
+        ),
+      0,
+    );
+  const hiddenAccountTwo = join(home, "hidden-account-2");
+
+  try {
+    const complete = await scanTokenFiles(options);
+    assert.equal(complete.files.length, 3);
+    assert.equal(total(complete), 600);
+    assert.deepEqual(complete.sources.sort(), ["claude-code", "codex"]);
+
+    await rename(accountTwo, hiddenAccountTwo);
+    const hidden = await scanTokenFiles(options);
+    assert.equal(total(hidden), 400, "hiding account 2 removes exactly its 200 tokens");
+
+    await rename(hiddenAccountTwo, accountTwo);
+    const restored = await scanTokenFiles(options);
+    assert.equal(total(restored), 600, "restoring account 2 restores the full sum");
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });
 
