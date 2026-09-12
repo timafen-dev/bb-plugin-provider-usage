@@ -8,16 +8,21 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { hostContract } from "./host-contract.js";
 import {
   claudeDirectory,
   planLabel,
   windowsFromUsage,
   type ClaudeMachineUsage,
 } from "./lib/claude-machine.js";
+import {
+  scanTokenFiles,
+  usageHostContract,
+  type FileCacheEntry,
+} from "./lib/token-scan.js";
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 const TIMEOUT_MS = 20_000;
+let tokenFileCache = new Map<string, FileCacheEntry>();
 
 async function readAccountEmail(directory: string): Promise<string | null> {
   // A sign-in writes the identity beside the credentials; the default location
@@ -40,7 +45,7 @@ async function readAccountEmail(directory: string): Promise<string | null> {
 }
 
 export default experimental_defineHostEntry({
-  contract: hostContract,
+  contract: usageHostContract,
   handlers: {
     claudeUsage: async (_input, context): Promise<ClaudeMachineUsage> => {
       const directory = claudeDirectory(process.env, homedir());
@@ -111,6 +116,34 @@ export default experimental_defineHostEntry({
           message: cause instanceof Error ? cause.message : String(cause),
         };
       }
+    },
+    tokenScan: async ({ force }) => {
+      const scanned = await scanTokenFiles({
+        cached: force === true ? new Map() : tokenFileCache,
+      });
+      tokenFileCache = new Map(
+        scanned.files.map((file) => [
+          file.path,
+          {
+            mtimeMs: file.mtimeMs,
+            size: file.size,
+            daily: file.daily,
+            ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
+            ...(file.blobCount != null
+              ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
+              : {}),
+          },
+        ]),
+      );
+      // File paths stay on the selected machine. The server only needs the
+      // bounded 90-day aggregate and cache counters.
+      return {
+        scannedAt: new Date().toISOString(),
+        fileCount: scanned.files.length,
+        changedFiles: scanned.changedFiles,
+        sources: scanned.sources,
+        daily: scanned.daily,
+      };
     },
   },
 });

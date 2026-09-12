@@ -1,6 +1,5 @@
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { hostContract } from "./host-contract";
 import {
   groupAgainstLimits,
   parseAdminAccounts,
@@ -19,10 +18,8 @@ import {
   type UsageHost,
 } from "./lib/dashboard";
 import {
-  scanTokenFiles,
-  seedDailyFromCache,
-  type FileCacheEntry,
-  type FileScanResult,
+  usageHostContract,
+  type HostTokenScan,
 } from "./lib/token-scan";
 import {
   mergeDaily,
@@ -35,7 +32,6 @@ import {
   assembleTokenSnapshot,
   formatTokenText,
   type TokenBucket,
-  type TokenSnapshot,
   type TokenWindowDays,
 } from "./lib/tokens";
 import {
@@ -244,6 +240,7 @@ export const rpcContract = defineRpcContract({
     input: z
       .object({
         days: z.union([z.literal(7), z.literal(30), z.literal(90)]),
+        hostId: z.string().nullable().optional(),
         force: z.boolean().optional(),
       })
       .strict(),
@@ -339,7 +336,9 @@ function createLimitStore(bb: BbPluginApi) {
     if (lastFetch) write.run("last-fetch", JSON.stringify(lastFetch));
   };
 
-  const claudeHost = bb.hosts.experimental_client({ contract: hostContract });
+  const claudeHost = bb.hosts.experimental_client({
+    contract: usageHostContract,
+  });
 
   /**
    * BB's own probe reads os.homedir()/.claude and ignores CLAUDE_CONFIG_DIR,
@@ -500,26 +499,32 @@ function parseCliArgs(argv: string[]): {
   return { json, hostId, help, tokens, live, days, force };
 }
 
-type TokenCacheRow = {
-  path: string;
-  mtime_ms: number;
-  size: number;
-  daily_json: string;
+type TokenHost = {
+  id: string;
+  status: "connected" | "disconnected";
 };
 
-type PersistedTokenFile = {
-  version: 2;
-  daily: Record<string, TokenBucket>;
-  keyedEvents?: FileScanResult["keyedEvents"];
-  blobCount?: number;
-  maxRowid?: number;
-};
-
-function isPersistedTokenFile(value: unknown): value is PersistedTokenFile {
-  if (!value || typeof value !== "object") return false;
-  const row = value as Record<string, unknown>;
-  return row.version === 2 && !!row.daily && typeof row.daily === "object";
+/** Resolve the implicit/default machine once, then keep every cache host-keyed. */
+export function resolveTokenHostId(
+  hosts: readonly TokenHost[],
+  requestedHostId: string | null,
+): string | null {
+  if (requestedHostId !== null) {
+    return hosts.some((host) => host.id === requestedHostId)
+      ? requestedHostId
+      : null;
+  }
+  return (
+    hosts.find((host) => host.status === "connected")?.id ?? hosts[0]?.id ?? null
+  );
 }
+
+type CachedHostTokens = {
+  atMs: number;
+  scan: HostTokenScan;
+  bbDaily: Record<string, Record<string, TokenBucket>>;
+  bbProviders: string[];
+};
 
 function createTokenStore(bb: BbPluginApi) {
   const db = bb.storage.database();
@@ -546,123 +551,14 @@ function createTokenStore(bb: BbPluginApi) {
       value TEXT NOT NULL
     )`,
   ]);
-
-  const loadCache = new Map<string, FileCacheEntry>();
-  for (const row of db
-    .prepare(
-      "SELECT path, mtime_ms, size, daily_json FROM token_file_cache",
-    )
-    .all() as TokenCacheRow[]) {
-    try {
-      const parsed = JSON.parse(row.daily_json) as
-        | PersistedTokenFile
-        | Record<string, TokenBucket>;
-      const persisted: PersistedTokenFile = isPersistedTokenFile(parsed)
-        ? parsed
-        : { version: 2, daily: parsed as Record<string, TokenBucket> };
-      loadCache.set(row.path, {
-        mtimeMs: row.mtime_ms,
-        size: row.size,
-        daily: persisted.daily,
-        ...(persisted.keyedEvents
-          ? { keyedEvents: persisted.keyedEvents }
-          : {}),
-        ...(persisted.blobCount != null
-          ? { blobCount: persisted.blobCount, maxRowid: persisted.maxRowid }
-          : {}),
-      });
-    } catch {
-      continue;
-    }
-  }
-
-  const upsert = db.prepare(
-    `INSERT INTO token_file_cache (path, mtime_ms, size, daily_json)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(path) DO UPDATE SET
-       mtime_ms = excluded.mtime_ms,
-       size = excluded.size,
-       daily_json = excluded.daily_json`,
-  );
-  const writeMeta = db.prepare(
-    `INSERT INTO token_meta (key, value) VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  );
-  const readMeta = db.prepare("SELECT value FROM token_meta WHERE key = ?");
-
-  let inflight: Promise<TokenSnapshot> | null = null;
-  let lastSnapshot: TokenSnapshot | null = null;
+  const tokenHost = bb.hosts.experimental_client({
+    contract: usageHostContract,
+  });
+  const cachedByHost = new Map<string, CachedHostTokens>();
+  const inflightByHost = new Map<string, Promise<CachedHostTokens>>();
 
   const publish = () => {
     bb.realtime.publish("tokens", { at: Date.now() });
-  };
-
-  const persistFiles = (files: FileScanResult[]) => {
-    const tx = db.transaction((rows: FileScanResult[]) => {
-      for (const file of rows) {
-        upsert.run(
-          file.path,
-          file.mtimeMs,
-          file.size,
-          JSON.stringify({
-            version: 2,
-            daily: file.daily,
-            ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
-            ...(file.blobCount != null
-              ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
-              : {}),
-          } satisfies PersistedTokenFile),
-        );
-        loadCache.set(file.path, {
-          mtimeMs: file.mtimeMs,
-          size: file.size,
-          daily: file.daily,
-          ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
-          ...(file.blobCount != null
-            ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
-            : {}),
-        });
-      }
-    });
-    tx(files);
-  };
-
-  const snapshotFrom = (
-    days: TokenWindowDays,
-    scanned: {
-      files: FileScanResult[];
-      changedFiles: number;
-      sources: string[];
-      daily: Record<string, Record<string, TokenBucket>>;
-    },
-  ) => {
-    const snapshot = assembleTokenSnapshot({
-      days,
-      fileCount: scanned.files.length,
-      changedFiles: scanned.changedFiles,
-      sources: scanned.sources,
-      daily: scanned.daily,
-    });
-    lastSnapshot = snapshot;
-    writeMeta.run("last-scan", snapshot.scannedAt);
-    return snapshot;
-  };
-
-  const hasCursorCache = () =>
-    [...loadCache.keys()].some(
-      (path) => path.includes("acp-sessions") || path.endsWith("store.db"),
-    );
-  const hasOpencodeCache = () =>
-    [...loadCache.keys()].some((path) => path.endsWith("opencode.db"));
-
-  const paintCachedStores = (
-    scanned: {
-      sources: string[];
-      daily: Record<string, Record<string, TokenBucket>>;
-    },
-  ) => {
-    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "cursor");
-    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "opencode");
   };
 
   /**
@@ -703,91 +599,84 @@ function createTokenStore(bb: BbPluginApi) {
       },
     });
 
-  const sync = async (days: TokenWindowDays, force = false) => {
-    if (inflight) return inflight;
-    inflight = (async () => {
-      const nowMs = Date.now();
-      const cached = force ? new Map() : loadCache;
-      const phase1Started = Date.now();
-      // jsonl (Codex/Claude) is the cheap first paint. Seed cursor/opencode
-      // from the last persisted totals so those series never vanish while
-      // the heavier stores refresh.
-      const jsonl = await scanTokenFiles({
-        cached,
-        includeCursor: false,
-        includeOpencode: false,
-      });
-      persistFiles(jsonl.files);
-      if (!force) paintCachedStores(jsonl);
-      snapshotFrom(days, jsonl);
-      publish();
-      bb.log.info(
-        `token scan phase1 ${Date.now() - phase1Started}ms sources=[${jsonl.sources.join(", ")}]`,
-      );
-
-      const phase2Started = Date.now();
-      const full = await scanTokenFiles({
-        cached: loadCache,
-        includeCursor: true,
-        includeOpencode: true,
-      });
-      persistFiles(full.files);
-      const bbUsage = await scanBbThreads(nowMs);
-      mergeDaily(full.daily, bbUsage.daily);
-      full.sources.push(...bbUsage.providers);
-      bb.log.info(
-        `token scan phase2 ${Date.now() - phase2Started}ms ` +
-          `changed=${full.changedFiles} ` +
-          `bbThreads=${bbUsage.threadsScanned} ` +
-          `providers [${bbUsage.providers.join(", ") || "none"}]`,
-      );
-      const snapshot = snapshotFrom(days, full);
-      publish();
-      return snapshot;
-    })().finally(() => {
-      inflight = null;
-    });
-    return inflight;
+  const resolveHost = async (requestedHostId: string | null) => {
+    const hosts = await bb.sdk.hosts.list();
+    const hostId = resolveTokenHostId(hosts, requestedHostId);
+    if (hostId !== null) return hostId;
+    throw new Error(
+      requestedHostId
+        ? `Unknown machine: ${requestedHostId}`
+        : "No enrolled machine is available for token scanning.",
+    );
   };
 
-  const get = async (days: TokenWindowDays, force = false) => {
-    if (force) return sync(days, true);
-    if (lastSnapshot) {
-      if (lastSnapshot.days !== days) {
-        const scanned = await scanTokenFiles({
-          cached: loadCache,
-          includeCursor: hasCursorCache(),
-          includeOpencode: hasOpencodeCache(),
-        });
-        paintCachedStores(scanned);
-        return assembleTokenSnapshot({
-          days,
-          fileCount: scanned.files.length,
-          changedFiles: scanned.changedFiles,
-          sources: scanned.sources,
-          daily: scanned.daily,
-        });
-      }
-      if (!inflight) {
-        const lastScan = (
-          readMeta.get("last-scan") as { value?: string } | undefined
-        )?.value;
-        const stale =
-          !lastScan || Date.now() - Date.parse(lastScan) >= 120_000;
-        if (stale) void sync(days);
-      }
-      return lastSnapshot;
-    }
-    const jsonl = await scanTokenFiles({
-      cached: loadCache,
-      includeCursor: false,
-      includeOpencode: false,
+  const assemble = (days: TokenWindowDays, cached: CachedHostTokens) => {
+    const daily = structuredClone(cached.scan.daily);
+    mergeDaily(daily, cached.bbDaily);
+    return assembleTokenSnapshot({
+      days,
+      scannedAt: cached.scan.scannedAt,
+      fileCount: cached.scan.fileCount,
+      changedFiles: cached.scan.changedFiles,
+      sources: [
+        ...new Set([...cached.scan.sources, ...cached.bbProviders]),
+      ],
+      daily,
     });
-    persistFiles(jsonl.files);
-    paintCachedStores(jsonl);
-    const snapshot = snapshotFrom(days, jsonl);
-    void sync(days);
-    return snapshot;
+  };
+
+  const sync = async (
+    days: TokenWindowDays,
+    requestedHostId: string | null = null,
+    force = false,
+  ) => {
+    const hostId = await resolveHost(requestedHostId);
+    const running = inflightByHost.get(hostId);
+    if (running && !force) return assemble(days, await running);
+
+    const run = (async (): Promise<CachedHostTokens> => {
+      const nowMs = Date.now();
+      const startedAt = Date.now();
+      const [scan, bbUsage] = await Promise.all([
+        tokenHost.call("tokenScan", { force }, { hostId }),
+        scanBbThreads(nowMs),
+      ]);
+      const cached = {
+        atMs: Date.now(),
+        scan,
+        bbDaily: bbUsage.daily,
+        bbProviders: bbUsage.providers,
+      };
+      cachedByHost.set(hostId, cached);
+      bb.log.info(
+        `token scan ${Date.now() - startedAt}ms host=${hostId} ` +
+          `changed=${scan.changedFiles} ` +
+          `bbThreads=${bbUsage.threadsScanned} ` +
+          `sources=[${scan.sources.join(", ")}]`,
+      );
+      return cached;
+    })();
+    inflightByHost.set(hostId, run);
+    try {
+      const cached = await run;
+      publish();
+      return assemble(days, cached);
+    } finally {
+      if (inflightByHost.get(hostId) === run) inflightByHost.delete(hostId);
+    }
+  };
+
+  const get = async (
+    days: TokenWindowDays,
+    requestedHostId: string | null = null,
+    force = false,
+  ) => {
+    const hostId = await resolveHost(requestedHostId);
+    const cached = cachedByHost.get(hostId);
+    if (!force && cached && Date.now() - cached.atMs < 120_000) {
+      return assemble(days, cached);
+    }
+    return sync(days, hostId, force);
   };
 
   return { get, sync };
@@ -1030,8 +919,8 @@ export default async function plugin(bb: BbPluginApi) {
     async getDashboard({ hostId, force }) {
       return loadDashboard(bb, hostId, limits, force === true);
     },
-    async getTokens({ days, force }) {
-      return tokens.get(days, force === true);
+    async getTokens({ days, hostId, force }) {
+      return tokens.get(days, hostId ?? null, force === true);
     },
     async getThroughput() {
       return throughput.snapshot();
@@ -1137,8 +1026,9 @@ export default async function plugin(bb: BbPluginApi) {
       },
       {
         name: "tokens",
-        summary: "Print global token usage across providers",
-        usage: "bb usage tokens [--days 7|30|90] [--force] [--json]",
+        summary: "Print token usage from one machine across providers",
+        usage:
+          "bb usage tokens [--days 7|30|90] [--machine <id-or-name>] [--force] [--json]",
       },
       {
         name: "live",
@@ -1165,14 +1055,6 @@ export default async function plugin(bb: BbPluginApi) {
         return { exitCode: 0, stdout: formatThroughputText(snapshot) };
       }
 
-      if (tokensOnly) {
-        const snapshot = await tokens.get(days, force);
-        if (json) {
-          return { exitCode: 0, stdout: `${JSON.stringify(snapshot, null, 2)}\n` };
-        }
-        return { exitCode: 0, stdout: formatTokenText(snapshot) };
-      }
-
       let resolvedHostId = hostId;
       if (hostId) {
         const hosts = await bb.sdk.hosts.list();
@@ -1188,8 +1070,16 @@ export default async function plugin(bb: BbPluginApi) {
         resolvedHostId = match.id;
       }
 
+      if (tokensOnly) {
+        const snapshot = await tokens.get(days, resolvedHostId, force);
+        if (json) {
+          return { exitCode: 0, stdout: `${JSON.stringify(snapshot, null, 2)}\n` };
+        }
+        return { exitCode: 0, stdout: formatTokenText(snapshot) };
+      }
+
       const snapshot = await loadDashboard(bb, resolvedHostId, limits, force);
-      const tokenSnapshot = await tokens.get(days, force);
+      const tokenSnapshot = await tokens.get(days, resolvedHostId, force);
       if (json) {
         return {
           exitCode: 0,

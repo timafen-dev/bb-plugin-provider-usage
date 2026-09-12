@@ -1,8 +1,11 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, readdirSync, realpathSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { defineRpcContract } from "@get-bb/plugin-sdk";
+import { z } from "zod";
+import { hostContract } from "../host-contract";
 import {
   isCursorStorePath,
   mergeCursorDaily,
@@ -11,6 +14,7 @@ import {
 import {
   isOpencodeStorePath,
   mergeOpencodeDaily,
+  opencodeDbPaths,
   scanOpencodeStores,
 } from "./opencode-scan";
 import {
@@ -21,6 +25,38 @@ import {
 } from "./tokens";
 
 export type DailyProviderBuckets = Record<string, Record<string, TokenBucket>>;
+
+const tokenBucketSchema = z
+  .object({
+    tokens: z.number(),
+    input: z.number(),
+    output: z.number(),
+    cached: z.number(),
+    reasoning: z.number(),
+    turns: z.number(),
+  })
+  .strict();
+
+export const hostTokenScanSchema = z
+  .object({
+    scannedAt: z.string(),
+    fileCount: z.number().int(),
+    changedFiles: z.number().int(),
+    sources: z.array(z.string()),
+    daily: z.record(z.string(), z.record(z.string(), tokenBucketSchema)),
+  })
+  .strict();
+
+export type HostTokenScan = z.infer<typeof hostTokenScanSchema>;
+
+/** One contract for the existing Claude probe and machine-local token scan. */
+export const usageHostContract = defineRpcContract({
+  ...hostContract,
+  tokenScan: {
+    input: z.object({ force: z.boolean().optional() }).strict(),
+    output: hostTokenScanSchema,
+  },
+});
 
 export interface FileScanResult {
   path: string;
@@ -257,11 +293,43 @@ export function tokenRoots(home = homedir(), env = process.env): {
   root: string;
 }[] {
   const roots: { id: string; root: string }[] = [];
-  const codexHome = env.CODEX_HOME?.trim() || join(home, ".codex");
-  const claudeHome = env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude");
-  roots.push({ id: "codex", root: join(codexHome, "sessions") });
-  roots.push({ id: "claude-code", root: join(claudeHome, "projects") });
-  roots.push({ id: "muse", root: join(museDataHome(home, env), "sessions") });
+  const seen = new Set<string>();
+  const add = (id: string, root: string) => {
+    let canonical: string;
+    try {
+      canonical = realpathSync.native(root);
+    } catch {
+      canonical = resolve(root);
+    }
+    const key = `${id}\0${canonical}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    roots.push({ id, root: canonical });
+  };
+
+  // A daemon can run under one BB account, but Token usage is a machine view:
+  // include the ordinary homes, the active overrides, and every BB account.
+  add("codex", join(home, ".codex", "sessions"));
+  add("claude-code", join(home, ".claude", "projects"));
+  const codexHome = env.CODEX_HOME?.trim();
+  const claudeHome = env.CLAUDE_CONFIG_DIR?.trim();
+  if (codexHome) add("codex", join(codexHome, "sessions"));
+  if (claudeHome) add("claude-code", join(claudeHome, "projects"));
+
+  try {
+    for (const entry of readdirSync(join(home, ".bb-accounts"), {
+      withFileTypes: true,
+    })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const account = join(home, ".bb-accounts", entry.name);
+      add("codex", join(account, "codex", "sessions"));
+      add("claude-code", join(account, "claude", "projects"));
+    }
+  } catch {
+    // A machine without BB account homes only has its ordinary provider homes.
+  }
+
+  add("muse", join(museDataHome(home, env), "sessions"));
   return roots;
 }
 
@@ -390,6 +458,8 @@ export async function scanTokenFiles(options?: {
   includeCursor?: boolean;
   includeOpencode?: boolean;
   cached?: Map<string, FileCacheEntry>;
+  home?: string;
+  env?: NodeJS.ProcessEnv;
 }): Promise<{
   files: FileScanResult[];
   changedFiles: number;
@@ -405,7 +475,9 @@ export async function scanTokenFiles(options?: {
   const daily: DailyProviderBuckets = {};
   const claudeEvents = new Map<string, TokenEvent>();
 
-  for (const source of tokenRoots()) {
+  const home = options?.home ?? homedir();
+  const env = options?.env ?? process.env;
+  for (const source of tokenRoots(home, env)) {
     let listing: string[];
     try {
       listing = await walkJsonl(source.root);
@@ -413,7 +485,7 @@ export async function scanTokenFiles(options?: {
       continue;
     }
     if (listing.length === 0) continue;
-    sources.push(source.id);
+    if (!sources.includes(source.id)) sources.push(source.id);
 
     for (const path of listing) {
       let info;
@@ -469,21 +541,23 @@ export async function scanTokenFiles(options?: {
         }
       }
     }
+  }
 
-    if (source.id === "claude-code") {
-      for (const event of claudeEvents.values()) {
-        const day = dayKey(event.atMs);
-        const row = daily[day] ?? {};
-        const current = row[source.id] ?? emptyBucket();
-        addBucket(current, event.bucket);
-        row[source.id] = current;
-        daily[day] = row;
-      }
-    }
+  // Claude fragments and copied subagent files can span account roots. Fold
+  // the identity map once after every root has contributed, never once/root.
+  for (const event of claudeEvents.values()) {
+    const day = dayKey(event.atMs);
+    const row = daily[day] ?? {};
+    const current = row["claude-code"] ?? emptyBucket();
+    addBucket(current, event.bucket);
+    row["claude-code"] = current;
+    daily[day] = row;
   }
 
   const cursorFiles =
-    options?.includeCursor === false ? [] : scanCursorStores({ cached, nowMs });
+    options?.includeCursor === false
+      ? []
+      : scanCursorStores({ cached, nowMs, home });
   if (cursorFiles.length > 0) {
     sources.push("cursor");
     for (const file of cursorFiles) {
@@ -501,7 +575,13 @@ export async function scanTokenFiles(options?: {
   }
 
   const opencodeFiles =
-    options?.includeOpencode === false ? [] : scanOpencodeStores({ cached, nowMs });
+    options?.includeOpencode === false
+      ? []
+      : scanOpencodeStores({
+          cached,
+          nowMs,
+          paths: opencodeDbPaths(home, env),
+        });
   if (opencodeFiles.length > 0) {
     sources.push("opencode");
     for (const file of opencodeFiles) {
