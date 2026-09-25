@@ -74,7 +74,10 @@ function claudeResult(hostId) {
   };
 }
 
-async function setup({ callHostRpc = ({ hostId }) => claudeResult(hostId) } = {}) {
+async function setup({
+  callHostRpc = ({ hostId }) => claudeResult(hostId),
+  readUsageLimits = ({ hostId } = {}) => usageLimits(hostId),
+} = {}) {
   const { bb, harness } = createFakePluginHost({
     pluginId: "provider-usage",
     sdk: {
@@ -86,7 +89,7 @@ async function setup({ callHostRpc = ({ hostId }) => claudeResult(hostId) } = {}
         ],
       },
       system: {
-        usageLimits: async ({ hostId } = {}) => usageLimits(hostId),
+        usageLimits: async (input) => readUsageLimits(input),
       },
     },
     experimental_callHostRpc: async (request) => callHostRpc(request),
@@ -136,6 +139,36 @@ test("accounts CLI keeps four machine/provider identities and quota0 separate", 
       })),
     );
     await reloaded.harness.lifecycle.dispose();
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("a failed machine usage source yields two unknown rows without hiding peers", async () => {
+  const harness = await setup({
+    readUsageLimits: ({ hostId } = {}) => {
+      if (hostId === "host-2") throw new Error("machine source offline");
+      return usageLimits(hostId);
+    },
+  });
+  try {
+    const result = await harness.behavior.runCli(["accounts", "--json", "--force"]);
+    assert.equal(result.exitCode, 0);
+    const body = JSON.parse(result.stdout);
+    assert.equal(body.accounts.length, 4);
+    assert.deepEqual(
+      body.accounts
+        .filter((row) => row.machineId === "host-2")
+        .map((row) => [row.providerId, row.status, row.accountEmail]),
+      [
+        ["codex", "unknown", null],
+        ["claude-code", "unknown", null],
+      ],
+    );
+    assert.equal(
+      body.accounts.find((row) => row.key === "host-1:codex").status,
+      "ok",
+    );
   } finally {
     await harness.lifecycle.dispose();
   }

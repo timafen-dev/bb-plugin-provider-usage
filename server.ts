@@ -570,8 +570,8 @@ async function loadAccountReadback(
 
   const accounts = await Promise.all(
     hosts.map(async (host) => {
-      if (host.status === "disconnected") {
-        return (["codex", "claude-code"] as const).map((providerId) => ({
+      const unknownAccounts = (message: string) =>
+        (["codex", "claude-code"] as const).map((providerId) => ({
           key: `${host.id}:${providerId}`,
           machineId: host.id,
           machineName: host.name,
@@ -583,7 +583,7 @@ async function loadAccountReadback(
           status: "unknown" as const,
           accountEmail: null,
           planLabel: null,
-          message: "Machine is disconnected; no fresh account status was read.",
+          message,
           windows: [],
           credits: null,
           resetCredits: null,
@@ -591,15 +591,30 @@ async function loadAccountReadback(
             providerId === "codex" ? ("primary-only" as const) : null,
           checkedAt: new Date().toISOString(),
         }));
+
+      if (host.status === "disconnected") {
+        return unknownAccounts(
+          "Machine is disconnected; no fresh account status was read.",
+        );
       }
 
-      const snapshot = await loadDashboard(
-        bb,
-        host.id,
-        limitsStore,
-        force,
-        hidden,
-      );
+      let snapshot: DashboardSnapshot;
+      try {
+        snapshot = await loadDashboard(
+          bb,
+          host.id,
+          limitsStore,
+          force,
+          hidden,
+        );
+      } catch (error) {
+        bb.log.warn(
+          `usage source unavailable for ${host.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return unknownAccounts("Machine usage source is unavailable.");
+      }
       return snapshot.providers
         .filter(
           (provider) =>
