@@ -82,6 +82,7 @@ Open **Usage** in the left sidebar.
 ```bash
 bb usage                          # remaining quota, plans, reset windows
 bb usage --json                   # same, machine-readable
+bb usage accounts --json          # separate Codex/Claude identity + status per machine
 bb usage live                     # what is being burned right now, by thread
 bb usage tokens --days 30         # global token volume across providers
 bb usage --machine <id-or-name>   # read another paired host
@@ -98,6 +99,14 @@ in newer Codex fields that BB's provider-neutral schema does not yet carry. It
 uses the existing Codex sign-in and never reads, stores, or returns auth tokens.
 If the installed Codex version does not support the request, the panel silently
 falls back to BB's regular windows.
+
+`bb usage accounts` keeps provider and machine sources separate. A missing
+machine-specific source is reported as `unknown`; an exhausted window remains
+`ok` with `remainingPercent: 0`; an expired or absent login remains
+`expired`/`unauthenticated`. Last-known values used during a rate-limit response
+are marked `stale`, never fresh. Codex credits and banked-reset enrichment is
+primary-only, so remote rows intentionally leave those fields null instead of
+copying credentials between machines.
 
 The on-demand amount shown here is a provider-reported spend-control period. It
 is separate from organization-wide OpenAI Platform API billing. Exact Platform

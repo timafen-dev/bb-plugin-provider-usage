@@ -7,7 +7,7 @@ import {
 
 function asLimitSlice(value: unknown): ProviderLimitSlice {
   if (!value || typeof value !== "object") {
-    return { status: "error", message: "No usage data returned." };
+    return { status: "unknown", message: "No usage data returned." };
   }
   return value as ProviderLimitSlice;
 }

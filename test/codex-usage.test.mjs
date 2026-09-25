@@ -173,7 +173,7 @@ const {
   shouldReuseCachedLimits,
 } = await import("../lib/limits-cache.ts");
 
-test("a Claude 429 reuses the last good windows instead of blanking the meter", () => {
+test("a Claude 429 marks reused last-good windows as stale", () => {
   const lastGood = rememberGoodLimits({
     codex: { status: "ok", windows: [{ label: "Weekly", usedPercent: 10, resetsAt: null }] },
     claudeCode: {
@@ -209,9 +209,41 @@ test("a Claude 429 reuses the last good windows instead of blanking the meter", 
       message: "Claude usage is rate limited right now. Try again shortly.",
     },
   }), true);
-  assert.equal(fresh.claudeCode.status, "ok");
+  assert.equal(fresh.claudeCode.status, "stale");
   assert.equal(fresh.claudeCode.windows?.[0]?.usedPercent, 41);
   assert.equal(fresh.codex.windows?.[0]?.usedPercent, 12);
+});
+
+test("legacy shared last-good state reproduces cross-machine identity leakage", () => {
+  const hostOneLastGood = {
+    claudeCode: {
+      status: "ok",
+      accountEmail: "host-one@example.test",
+      windows: [
+        { label: "Weekly limit", usedPercent: 62, resetsAt: null },
+      ],
+    },
+  };
+  const hostTwoFresh = {
+    codex: { status: "ok", windows: [] },
+    claudeCode: {
+      status: "error",
+      message: "Claude usage is rate limited right now.",
+      accountEmail: null,
+    },
+    cursor: { status: "not_installed", windows: [] },
+    muse: { status: "not_installed", windows: [] },
+  };
+
+  const legacySharedOverlay = overlayLastGoodLimits(
+    hostTwoFresh,
+    hostOneLastGood,
+  );
+  assert.equal(
+    legacySharedOverlay.claudeCode.accountEmail,
+    "host-one@example.test",
+    "a shared cache assigns host one's identity to host two",
+  );
 });
 
 test("limits cache is reused inside the TTL and after a rate-limit backoff", () => {

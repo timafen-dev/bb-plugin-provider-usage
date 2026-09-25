@@ -37,8 +37,10 @@ export function overlayLastGoodLimits(
     if (!isRateLimitedSlice(current) || prior?.status !== "ok") continue;
     next[key] = {
       ...prior,
+      status: "stale",
       planLabel: current.planLabel ?? prior.planLabel,
       accountEmail: current.accountEmail ?? prior.accountEmail,
+      message: current.message ?? "The provider source did not return fresh data.",
     };
   }
   return next;

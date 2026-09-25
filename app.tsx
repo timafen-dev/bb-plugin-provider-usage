@@ -769,13 +769,21 @@ function ProviderLimitsSection({
                   ) : null}
                 </div>
                 <div className="min-w-0 flex-1 space-y-4">
-                  {provider.status === "ok" && provider.windows.length > 0 ? (
-                    provider.windows.map((window, index) => (
-                      <UsageBar
-                        key={`${window.label}-${window.resetsAt ?? index}`}
-                        window={window}
-                      />
-                    ))
+                  {(provider.status === "ok" || provider.status === "stale") &&
+                  provider.windows.length > 0 ? (
+                    <>
+                      {provider.status === "stale" ? (
+                        <p className="text-sm text-muted-foreground">
+                          Last known values — refresh did not return fresh data.
+                        </p>
+                      ) : null}
+                      {provider.windows.map((window, index) => (
+                        <UsageBar
+                          key={`${window.label}-${window.resetsAt ?? index}`}
+                          window={window}
+                        />
+                      ))}
+                    </>
                   ) : (
                     <p className="text-sm text-muted-foreground">
                       {provider.status === "ok"
