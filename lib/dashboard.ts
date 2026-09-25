@@ -49,6 +49,8 @@ export function pickProviderLimitRaw(
 
 export type UsageStatus =
   | "ok"
+  | "stale"
+  | "unknown"
   | "not_installed"
   | "unauthenticated"
   | "expired"
@@ -242,6 +244,10 @@ export function statusLabel(status: UsageStatus): string {
   switch (status) {
     case "ok":
       return "Signed in";
+    case "stale":
+      return "Last known";
+    case "unknown":
+      return "Source unavailable";
     case "unauthenticated":
       return "Not signed in";
     case "expired":
@@ -426,7 +432,7 @@ export function assembleDashboard(input: {
       planLabel: slice.planLabel ?? null,
       message: slice.message ?? null,
       windows:
-        slice.status === "ok"
+        slice.status === "ok" || slice.status === "stale"
           ? mergeWindows(slice.windows, supplement?.windows)
           : [],
       credits: slice.status === "ok" ? (supplement?.credits ?? null) : null,

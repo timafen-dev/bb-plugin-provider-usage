@@ -58,7 +58,16 @@ test("prefers current provider ids and reports genuinely missing data", () => {
 
   assert.equal(normalized.claudeCode.planLabel, "Current");
   assert.deepEqual(normalized.cursor, {
-    status: "error",
+    status: "unknown",
+    message: "No usage data returned.",
+  });
+});
+
+test("reports missing provider data as unknown rather than quota zero", () => {
+  const normalized = normalizeProviderLimits({ codex: healthy("Pro") });
+
+  assert.deepEqual(normalized.claudeCode, {
+    status: "unknown",
     message: "No usage data returned.",
   });
 });

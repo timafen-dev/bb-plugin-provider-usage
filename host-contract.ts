@@ -4,7 +4,15 @@ import { z } from "zod";
 
 export const claudeMachineUsageSchema = z
   .object({
-    status: z.enum(["ok", "not_installed", "unauthenticated", "expired", "error"]),
+    status: z.enum([
+      "ok",
+      "stale",
+      "unknown",
+      "not_installed",
+      "unauthenticated",
+      "expired",
+      "error",
+    ]),
     accountEmail: z.string().nullable(),
     planLabel: z.string().nullable(),
     message: z.string().nullable(),

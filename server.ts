@@ -92,6 +92,8 @@ const providerUsageSchema = z.object({
   logoUrl: z.string().nullable(),
   status: z.enum([
     "ok",
+    "stale",
+    "unknown",
     "not_installed",
     "unauthenticated",
     "expired",
@@ -323,6 +325,11 @@ type LastFetch = {
   rateLimitedAt: number | null;
 };
 
+type HostLimitState = {
+  lastGood: LastGoodLimits;
+  lastFetch: LastFetch | null;
+};
+
 function createLimitStore(bb: BbPluginApi) {
   const db = bb.storage.database();
   const read = db.prepare("SELECT value FROM limits_cache WHERE key = ?");
@@ -341,8 +348,6 @@ function createLimitStore(bb: BbPluginApi) {
     }
   };
 
-  let lastGood = readJson<LastGoodLimits>("last-good") ?? {};
-  let lastFetch = readJson<LastFetch>("last-fetch");
   /**
    * One entry per machine. A single shared slot was enough while the page
    * showed one machine at a time; asking for several at once turned it into a
@@ -355,11 +360,22 @@ function createLimitStore(bb: BbPluginApi) {
     Promise<Record<ProviderKey, ProviderLimitSlice>>
   >();
   const hostKey = (hostId: string | null) => hostId ?? "";
-  if (lastFetch) fetchedByHost.set(hostKey(lastFetch.hostId), lastFetch);
+  const states = new Map<string, HostLimitState>();
+  const stateFor = (hostId: string | null): HostLimitState => {
+    const key = hostKey(hostId);
+    const existing = states.get(key);
+    if (existing) return existing;
+    const restored = readJson<HostLimitState>(`host-v2:${key}`) ?? {
+      lastGood: {},
+      lastFetch: null,
+    };
+    states.set(key, restored);
+    if (restored.lastFetch) fetchedByHost.set(key, restored.lastFetch);
+    return restored;
+  };
 
-  const persist = () => {
-    write.run("last-good", JSON.stringify(lastGood));
-    if (lastFetch) write.run("last-fetch", JSON.stringify(lastFetch));
+  const persist = (hostId: string | null, state: HostLimitState) => {
+    write.run(`host-v2:${hostKey(hostId)}`, JSON.stringify(state));
   };
 
   const claudeHost = bb.hosts.experimental_client({ contract: hostContract });
@@ -372,8 +388,9 @@ function createLimitStore(bb: BbPluginApi) {
    * account is invisible. Ask the machine itself instead; its worker inherits
    * the daemon environment and therefore resolves its own login.
    *
-   * Falls back to whatever BB returned, so a machine without the host bundle
-   * loaded is no worse off than before.
+   * A failed machine-specific probe must stay unknown. Falling back to BB's
+   * home-directory probe can attach another login's identity and quota to this
+   * machine, which is worse than an honest unknown state.
    */
   const claudeForHost = async (
     hostId: string | null,
@@ -382,7 +399,6 @@ function createLimitStore(bb: BbPluginApi) {
     if (hostId === null) return fallback;
     try {
       const own = await claudeHost.call("claudeUsage", null, { hostId });
-      if (own.status === "ok" && own.windows.length === 0) return fallback;
       return {
         status: own.status,
         accountEmail: own.accountEmail,
@@ -392,28 +408,35 @@ function createLimitStore(bb: BbPluginApi) {
       };
     } catch (error) {
       bb.log.warn(
-        `claude usage: falling back to BB's own reading for ${hostId}: ${
+        `claude usage source unavailable for ${hostId}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return fallback;
+      return {
+        status: "unknown",
+        accountEmail: null,
+        planLabel: null,
+        message: "Machine-specific Claude usage source is unavailable.",
+        windows: [],
+      };
     }
   };
 
   const readLive = async (hostId: string | null) => {
+    const state = stateFor(hostId);
     const raw = await bb.sdk.system.usageLimits(hostId ? { hostId } : {});
     const fresh = normalizeProviderLimits(raw);
     fresh.claudeCode = await claudeForHost(hostId, fresh.claudeCode);
-    const limits = overlayLastGoodLimits(fresh, lastGood);
-    lastGood = rememberGoodLimits(limits, lastGood);
-    lastFetch = {
+    const limits = overlayLastGoodLimits(fresh, state.lastGood);
+    state.lastGood = rememberGoodLimits(limits, state.lastGood);
+    state.lastFetch = {
       at: Date.now(),
       hostId,
       limits,
       rateLimitedAt: hasRateLimitedProvider(fresh) ? Date.now() : null,
     };
-    fetchedByHost.set(hostKey(hostId), lastFetch);
-    persist();
+    fetchedByHost.set(hostKey(hostId), state.lastFetch);
+    persist(hostId, state);
     if (hasRateLimitedProvider(fresh)) {
       bb.log.warn(
         "usage limits: a provider was rate-limited; serving last good windows",
@@ -424,6 +447,7 @@ function createLimitStore(bb: BbPluginApi) {
 
   const get = async (hostId: string | null, force = false) => {
     const key = hostKey(hostId);
+    stateFor(hostId);
     const cached = fetchedByHost.get(key);
     if (
       cached &&
@@ -501,6 +525,146 @@ async function loadDashboard(
   };
 }
 
+type AccountReadback = {
+  fetchedAt: string;
+  accounts: Array<{
+    key: string;
+    machineId: string;
+    machineName: string;
+    providerId: "codex" | "claude-code";
+    source: "system.usageLimits" | "host.claudeUsage";
+    status: ProviderLimitSlice["status"];
+    accountEmail: string | null;
+    planLabel: string | null;
+    message: string | null;
+    windows: DashboardSnapshot["providers"][number]["windows"];
+    credits: DashboardSnapshot["providers"][number]["credits"];
+    resetCredits: DashboardSnapshot["providers"][number]["resetCredits"];
+    enrichmentScope: "primary-only" | null;
+    checkedAt: string;
+  }>;
+};
+
+async function loadAccountReadback(
+  bb: BbPluginApi,
+  hostId: string | null,
+  limitsStore: {
+    get: (
+      hostId: string | null,
+      force?: boolean,
+    ) => Promise<Record<ProviderKey, ProviderLimitSlice>>;
+  },
+  force: boolean,
+  hidden: PanelHidden,
+): Promise<AccountReadback> {
+  const hosts = (await bb.sdk.hosts.list())
+    .map(
+      (host): UsageHost => ({
+        id: host.id,
+        name: host.name,
+        status: host.status,
+      }),
+    )
+    .filter((host) => !isMachineHidden(hidden, host))
+    .filter((host) => hostId === null || host.id === hostId);
+
+  const accounts = await Promise.all(
+    hosts.map(async (host) => {
+      const unknownAccounts = (message: string) =>
+        (["codex", "claude-code"] as const).map((providerId) => ({
+          key: `${host.id}:${providerId}`,
+          machineId: host.id,
+          machineName: host.name,
+          providerId,
+          source:
+            providerId === "codex"
+              ? ("system.usageLimits" as const)
+              : ("host.claudeUsage" as const),
+          status: "unknown" as const,
+          accountEmail: null,
+          planLabel: null,
+          message,
+          windows: [],
+          credits: null,
+          resetCredits: null,
+          enrichmentScope:
+            providerId === "codex" ? ("primary-only" as const) : null,
+          checkedAt: new Date().toISOString(),
+        }));
+
+      if (host.status === "disconnected") {
+        return unknownAccounts(
+          "Machine is disconnected; no fresh account status was read.",
+        );
+      }
+
+      let snapshot: DashboardSnapshot;
+      try {
+        snapshot = await loadDashboard(
+          bb,
+          host.id,
+          limitsStore,
+          force,
+          hidden,
+        );
+      } catch (error) {
+        bb.log.warn(
+          `usage source unavailable for ${host.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return unknownAccounts("Machine usage source is unavailable.");
+      }
+      return snapshot.providers
+        .filter(
+          (provider) =>
+            provider.key === "codex" || provider.key === "claudeCode",
+        )
+        .map((provider) => ({
+          key: `${host.id}:${provider.id}`,
+          machineId: host.id,
+          machineName: host.name,
+          providerId: provider.id as "codex" | "claude-code",
+          source:
+            provider.key === "codex"
+              ? ("system.usageLimits" as const)
+              : ("host.claudeUsage" as const),
+          status: provider.status,
+          accountEmail: provider.accountEmail,
+          planLabel: provider.planLabel,
+          message: provider.message,
+          windows: provider.windows,
+          credits: provider.credits,
+          resetCredits: provider.resetCredits,
+          enrichmentScope:
+            provider.key === "codex" ? ("primary-only" as const) : null,
+          checkedAt: snapshot.fetchedAt,
+        }));
+    }),
+  );
+
+  return { fetchedAt: new Date().toISOString(), accounts: accounts.flat() };
+}
+
+function formatAccountReadbackText(readback: AccountReadback): string {
+  const lines = [`Usage accounts · ${readback.fetchedAt}`];
+  for (const account of readback.accounts) {
+    const identity = account.accountEmail ?? "identity unknown";
+    const tightest = account.windows.reduce<number | null>(
+      (value, window) =>
+        value === null
+          ? window.remainingPercent
+          : Math.min(value, window.remainingPercent),
+      null,
+    );
+    lines.push(
+      `${account.machineName} · ${account.providerId} · ${identity} · ${account.status}` +
+        (tightest === null ? "" : ` · ${Math.round(tightest)}% left`),
+    );
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 function isTokenWindow(value: number): value is TokenWindowDays {
   return (TOKEN_WINDOWS as readonly number[]).includes(value);
 }
@@ -511,6 +675,7 @@ function parseCliArgs(argv: string[]): {
   help: boolean;
   tokens: boolean;
   live: boolean;
+  accounts: boolean;
   days: TokenWindowDays;
   force: boolean;
 } {
@@ -518,6 +683,7 @@ function parseCliArgs(argv: string[]): {
   let help = false;
   let tokens = false;
   let live = false;
+  let accounts = false;
   let force = false;
   let days: TokenWindowDays = 30;
   let hostId: string | null = null;
@@ -528,6 +694,7 @@ function parseCliArgs(argv: string[]): {
     else if (arg === "--force") force = true;
     else if (arg === "tokens") tokens = true;
     else if (arg === "live") live = true;
+    else if (arg === "accounts") accounts = true;
     else if (arg === "--days") {
       const next = Number(argv[i + 1]);
       if (isTokenWindow(next)) days = next;
@@ -537,7 +704,7 @@ function parseCliArgs(argv: string[]): {
       i += 1;
     }
   }
-  return { json, hostId, help, tokens, live, days, force };
+  return { json, hostId, help, tokens, live, accounts, days, force };
 }
 
 type TokenCacheRow = {
@@ -1297,15 +1464,28 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "Print live token throughput across running threads",
         usage: "bb usage live [--json]",
       },
+      {
+        name: "accounts",
+        summary: "Print separate Codex and Claude account status for every machine",
+        usage: "bb usage accounts [--machine <id-or-name>] [--force] [--json]",
+      },
     ],
     async run(argv) {
-      const { json, hostId, help, tokens: tokensOnly, live, days, force } =
-        parseCliArgs(argv);
+      const {
+        json,
+        hostId,
+        help,
+        tokens: tokensOnly,
+        live,
+        accounts,
+        days,
+        force,
+      } = parseCliArgs(argv);
       if (help) {
         return {
           exitCode: 0,
           stdout:
-            "Usage: bb usage [show|tokens|live] [--days 7|30|90] [--machine <id-or-name>] [--force] [--json]\n",
+            "Usage: bb usage [show|accounts|tokens|live] [--days 7|30|90] [--machine <id-or-name>] [--force] [--json]\n",
         };
       }
 
@@ -1338,6 +1518,22 @@ export default async function plugin(bb: BbPluginApi) {
           };
         }
         resolvedHostId = match.id;
+      }
+
+      if (accounts) {
+        const readback = await loadAccountReadback(
+          bb,
+          resolvedHostId,
+          limits,
+          force,
+          await readHidden(),
+        );
+        return json
+          ? {
+              exitCode: 0,
+              stdout: `${JSON.stringify(readback, null, 2)}\n`,
+            }
+          : { exitCode: 0, stdout: formatAccountReadbackText(readback) };
       }
 
       const snapshot = await loadDashboard(bb, resolvedHostId, limits, force, await readHidden());
