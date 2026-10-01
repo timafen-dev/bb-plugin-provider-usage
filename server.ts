@@ -19,6 +19,10 @@ import {
   PROVIDER_KEYS,
   assembleDashboard,
   formatDashboardText,
+  formatPercent,
+  formatResetAbsolute,
+  formatResetRelative,
+  statusLabel,
   type DashboardSnapshot,
   type ProviderKey,
   type ProviderLimitSlice,
@@ -70,6 +74,12 @@ import {
   shouldReuseCachedLimits,
 } from "./lib/limits-cache";
 import { normalizeProviderLimits } from "./lib/provider-limits";
+import {
+  assembleSubscriptions,
+  tightestSubscription,
+  type Subscription,
+  type SubscriptionMemory,
+} from "./lib/subscriptions";
 
 const usageWindowSchema = z.object({
   label: z.string(),
@@ -255,7 +265,53 @@ const throughputSnapshotSchema = z.object({
   ),
 });
 
+const usageStatusSchema = z.enum([
+  "ok",
+  "stale",
+  "unknown",
+  "not_installed",
+  "unauthenticated",
+  "expired",
+  "error",
+]);
+
+const subscriptionSchema = z.object({
+  key: z.string(),
+  providerId: z.enum(["codex", "claude-code"]),
+  accountEmail: z.string(),
+  planLabel: z.string().nullable(),
+  status: z.enum(["ok", "stale", "unknown"]),
+  windows: z.array(usageWindowSchema),
+  credits: providerUsageSchema.shape.credits,
+  resetCredits: providerUsageSchema.shape.resetCredits,
+  readFrom: z
+    .object({
+      machineId: z.string(),
+      machineName: z.string(),
+      checkedAt: z.string(),
+    })
+    .nullable(),
+  machines: z.array(
+    z.object({
+      machineId: z.string(),
+      machineName: z.string(),
+      status: usageStatusSchema,
+      message: z.string().nullable(),
+      checkedAt: z.string(),
+    }),
+  ),
+});
+
+const subscriptionsSchema = z.object({
+  fetchedAt: z.string(),
+  subscriptions: z.array(subscriptionSchema),
+});
+
 export const rpcContract = defineRpcContract({
+  getSubscriptions: {
+    input: z.object({ force: z.boolean().optional() }).strict(),
+    output: subscriptionsSchema,
+  },
   getDashboard: {
     input: z
       .object({
@@ -665,6 +721,125 @@ function formatAccountReadbackText(readback: AccountReadback): string {
   return `${lines.join("\n")}\n`;
 }
 
+type SubscriptionsReadback = {
+  fetchedAt: string;
+  subscriptions: Subscription[];
+};
+
+/**
+ * What survives between rounds: the last successful reading of each plan and
+ * which machines have named it. Lives in the same table as the per-machine
+ * limits cache so a server restart does not blank the panel.
+ */
+function createSubscriptionMemory(bb: BbPluginApi) {
+  const db = bb.storage.database();
+  const PREFIX = "subscription-v1:";
+  const list = db.prepare("SELECT key, value FROM limits_cache WHERE key LIKE ?");
+  const write = db.prepare(
+    `INSERT INTO limits_cache (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  );
+  return {
+    read(): Record<string, SubscriptionMemory> {
+      const memory: Record<string, SubscriptionMemory> = {};
+      for (const row of list.all(`${PREFIX}%`) as Array<{ key: string; value: string }>) {
+        try {
+          memory[row.key.slice(PREFIX.length)] = JSON.parse(row.value) as SubscriptionMemory;
+        } catch {
+          // A damaged entry is forgotten rather than trusted.
+        }
+      }
+      return memory;
+    },
+    write(memory: Record<string, SubscriptionMemory>) {
+      for (const [key, entry] of Object.entries(memory)) {
+        write.run(`${PREFIX}${key}`, JSON.stringify(entry));
+      }
+    },
+  };
+}
+
+/**
+ * The plans themselves — one row per provider + account across every machine
+ * — built from the per-machine readback. See lib/subscriptions.ts for the
+ * rules; this only feeds it and keeps its memory.
+ */
+async function loadSubscriptions(
+  bb: BbPluginApi,
+  limitsStore: {
+    get: (
+      hostId: string | null,
+      force?: boolean,
+    ) => Promise<Record<ProviderKey, ProviderLimitSlice>>;
+  },
+  memoryStore: ReturnType<typeof createSubscriptionMemory>,
+  force: boolean,
+  hidden: PanelHidden,
+): Promise<SubscriptionsReadback> {
+  const readback = await loadAccountReadback(bb, null, limitsStore, force, hidden);
+  const { subscriptions, memory } = assembleSubscriptions({
+    accounts: readback.accounts.map((account) => ({
+      machineId: account.machineId,
+      machineName: account.machineName,
+      providerId: account.providerId,
+      status: account.status,
+      accountEmail: account.accountEmail,
+      planLabel: account.planLabel,
+      message: account.message,
+      windows: account.windows,
+      credits: account.credits,
+      resetCredits: account.resetCredits,
+      checkedAt: account.checkedAt,
+    })),
+    memory: memoryStore.read(),
+  });
+  memoryStore.write(memory);
+  return { fetchedAt: readback.fetchedAt, subscriptions };
+}
+
+function formatSubscriptionsText(readback: SubscriptionsReadback): string {
+  const lines = [`Subscriptions · ${readback.fetchedAt}`];
+  const tightest = tightestSubscription(readback.subscriptions);
+  lines.push(
+    `  Tightest         ${
+      tightest
+        ? `${tightest.subscription.providerId} ${tightest.subscription.accountEmail} ${tightest.window.label} · ${formatPercent(tightest.window.remainingPercent)} left`
+        : "—"
+    }`,
+  );
+  for (const plan of readback.subscriptions) {
+    lines.push("");
+    lines.push(
+      [plan.providerId, plan.planLabel, plan.accountEmail].filter(Boolean).join(" · "),
+    );
+    if (plan.status === "unknown") {
+      lines.push("  No reading yet");
+    } else {
+      if (plan.readFrom) {
+        lines.push(
+          `  ${plan.status === "ok" ? "Read" : "Last known"} ${plan.readFrom.checkedAt} on ${plan.readFrom.machineName}`,
+        );
+      }
+      for (const window of plan.windows) {
+        lines.push(
+          `  ${window.label.padEnd(18)} ${formatPercent(window.remainingPercent)} left · ${formatPercent(window.usedPercent)} used${
+            window.resetsAt
+              ? ` · resets ${formatResetAbsolute(window.resetsAt)} (in ${formatResetRelative(window.resetsAt)})`
+              : ""
+          }`,
+        );
+      }
+    }
+    for (const machine of plan.machines) {
+      if (machine.status === "ok") continue;
+      lines.push(
+        `  ${machine.machineName}: ${statusLabel(machine.status)}${machine.message ? ` — ${machine.message}` : ""}`,
+      );
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 function isTokenWindow(value: number): value is TokenWindowDays {
   return (TOKEN_WINDOWS as readonly number[]).includes(value);
 }
@@ -676,6 +851,7 @@ function parseCliArgs(argv: string[]): {
   tokens: boolean;
   live: boolean;
   accounts: boolean;
+  subscriptions: boolean;
   days: TokenWindowDays;
   force: boolean;
 } {
@@ -684,6 +860,7 @@ function parseCliArgs(argv: string[]): {
   let tokens = false;
   let live = false;
   let accounts = false;
+  let subscriptions = false;
   let force = false;
   let days: TokenWindowDays = 30;
   let hostId: string | null = null;
@@ -695,6 +872,7 @@ function parseCliArgs(argv: string[]): {
     else if (arg === "tokens") tokens = true;
     else if (arg === "live") live = true;
     else if (arg === "accounts") accounts = true;
+    else if (arg === "subscriptions" || arg === "plans") subscriptions = true;
     else if (arg === "--days") {
       const next = Number(argv[i + 1]);
       if (isTokenWindow(next)) days = next;
@@ -704,7 +882,7 @@ function parseCliArgs(argv: string[]): {
       i += 1;
     }
   }
-  return { json, hostId, help, tokens, live, accounts, days, force };
+  return { json, hostId, help, tokens, live, accounts, subscriptions, days, force };
 }
 
 type TokenCacheRow = {
@@ -1244,6 +1422,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
   const tokens = createTokenStore(bb);
   const limits = createLimitStore(bb);
+  const subscriptionMemory = createSubscriptionMemory(bb);
   const throughput = createThroughputStore(bb);
 
   const panelSettings = bb.settings.define({
@@ -1346,6 +1525,15 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.rpc.register(rpcContract, {
+    async getSubscriptions({ force }) {
+      return loadSubscriptions(
+        bb,
+        limits,
+        subscriptionMemory,
+        force === true,
+        await readHidden(),
+      );
+    },
     async getDashboard({ hostId, force }) {
       return loadDashboard(bb, hostId, limits, force === true, await readHidden());
     },
@@ -1469,6 +1657,12 @@ export default async function plugin(bb: BbPluginApi) {
         summary: "Print separate Codex and Claude account status for every machine",
         usage: "bb usage accounts [--machine <id-or-name>] [--force] [--json]",
       },
+      {
+        name: "subscriptions",
+        summary:
+          "Print each plan once — provider + account across machines — with its live or last-known quota",
+        usage: "bb usage subscriptions [--force] [--json]",
+      },
     ],
     async run(argv) {
       const {
@@ -1478,6 +1672,7 @@ export default async function plugin(bb: BbPluginApi) {
         tokens: tokensOnly,
         live,
         accounts,
+        subscriptions: subscriptionsOnly,
         days,
         force,
       } = parseCliArgs(argv);
@@ -1485,7 +1680,7 @@ export default async function plugin(bb: BbPluginApi) {
         return {
           exitCode: 0,
           stdout:
-            "Usage: bb usage [show|accounts|tokens|live] [--days 7|30|90] [--machine <id-or-name>] [--force] [--json]\n",
+            "Usage: bb usage [show|subscriptions|accounts|tokens|live] [--days 7|30|90] [--machine <id-or-name>] [--force] [--json]\n",
         };
       }
 
@@ -1520,6 +1715,19 @@ export default async function plugin(bb: BbPluginApi) {
         resolvedHostId = match.id;
       }
 
+      if (subscriptionsOnly) {
+        const readback = await loadSubscriptions(
+          bb,
+          limits,
+          subscriptionMemory,
+          force,
+          await readHidden(),
+        );
+        return json
+          ? { exitCode: 0, stdout: `${JSON.stringify(readback, null, 2)}\n` }
+          : { exitCode: 0, stdout: formatSubscriptionsText(readback) };
+      }
+
       if (accounts) {
         const readback = await loadAccountReadback(
           bb,
@@ -1536,17 +1744,32 @@ export default async function plugin(bb: BbPluginApi) {
           : { exitCode: 0, stdout: formatAccountReadbackText(readback) };
       }
 
-      const snapshot = await loadDashboard(bb, resolvedHostId, limits, force, await readHidden());
+      const hidden = await readHidden();
+      const snapshot = await loadDashboard(bb, resolvedHostId, limits, force, hidden);
+      // No machine asked for: the plans come first, because the server's own
+      // disk below is not the owner's computer and must not pass for it.
+      const plans =
+        resolvedHostId === null
+          ? await loadSubscriptions(bb, limits, subscriptionMemory, force, hidden)
+          : null;
       const tokenSnapshot = await tokens.get(days, force);
       if (json) {
         return {
           exitCode: 0,
-          stdout: `${JSON.stringify({ ...snapshot, tokens: tokenSnapshot }, null, 2)}\n`,
+          stdout: `${JSON.stringify(
+            {
+              ...snapshot,
+              ...(plans ? { subscriptions: plans.subscriptions } : {}),
+              tokens: tokenSnapshot,
+            },
+            null,
+            2,
+          )}\n`,
         };
       }
       return {
         exitCode: 0,
-        stdout: `${formatDashboardText(snapshot)}\n${formatTokenText(tokenSnapshot)}`,
+        stdout: `${plans ? `${formatSubscriptionsText(plans)}\n` : ""}${formatDashboardText(snapshot)}\n${formatTokenText(tokenSnapshot)}`,
       };
     },
   });

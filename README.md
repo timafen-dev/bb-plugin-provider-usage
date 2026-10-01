@@ -18,7 +18,16 @@ BB-launched ACP sessions whose bridges do not emit them, the plugin maps the
 provider thread id back to opencode's exact local counters or Cursor's
 text-derived estimate.
 
-**Provider limits.** One pane, one row per provider: its plan, each
+**Subscriptions.** The plans you pay for, each once: provider + account,
+read from whichever paired machine can see it right now. A machine that has
+lost its own sign-in is listed under the plan as "Not signed in" or "Session
+expired"; it never makes the plan disappear and is never mistaken for an
+exhausted plan (that is "Signed in" with 0 % left). When no machine can read a
+plan, its last successful reading stays on screen marked **last known**, with
+the time and machine it came from. The homepage chips and the sidebar ring
+(the tightest window across plans) read from this view.
+
+**Provider limits.** One pane per machine, one row per provider: its plan, each
 rate-limit window (5-hour, weekly, monthly — whatever the provider reports), how
 much is left, and when it comes back. Every meter counts **down** — the ring,
 the bar, and the number all show what remains, the way each provider states its
@@ -80,8 +89,9 @@ Open **Usage** in the left sidebar.
 ## CLI
 
 ```bash
-bb usage                          # remaining quota, plans, reset windows
-bb usage --json                   # same, machine-readable
+bb usage                          # plans across machines, then the BB server's own limits
+bb usage --json                   # same, machine-readable (`subscriptions[]` + server scope)
+bb usage subscriptions --json     # each plan once: live or last-known quota, machines and their state
 bb usage accounts --json          # separate Codex/Claude identity + status per machine
 bb usage live                     # what is being burned right now, by thread
 bb usage tokens --days 30         # global token volume across providers
@@ -99,6 +109,17 @@ in newer Codex fields that BB's provider-neutral schema does not yet carry. It
 uses the existing Codex sign-in and never reads, stores, or returns auth tokens.
 If the installed Codex version does not support the request, the panel silently
 falls back to BB's regular windows.
+
+`bb usage subscriptions` groups the per-machine rows by provider + account
+e-mail and never across identities. The freshest `ok` reading wins; a
+rate-limit overlay is used only when nothing fresh exists; otherwise the last
+successful reading is shown as `stale` with `readFrom` naming its machine and
+time. Local auth states stay on the machine rows under `machines[]`. Codex
+credits and banked resets, which only the primary machine carries, are borrowed
+from a sibling reading of the *same* plan. The memory survives a server restart.
+
+Without `--machine`, the "Usage · BB server" block reads the BB server's own
+disk, which is not any paired machine; it is labelled as such.
 
 `bb usage accounts` keeps provider and machine sources separate. A missing
 machine-specific source is reported as `unknown`; an exhausted window remains

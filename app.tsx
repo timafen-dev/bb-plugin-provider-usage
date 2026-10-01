@@ -32,6 +32,11 @@ import {
   type TokenWindowDays,
 } from "./lib/tokens";
 import { SERIES_STYLESHEET, providerColor } from "./lib/series-palette";
+import {
+  subscriptionHero,
+  tightestSubscription,
+  type Subscription,
+} from "./lib/subscriptions";
 import { LiveThroughputSection } from "./components/live-throughput";
 import {
   HomepageUsageSkeleton,
@@ -111,6 +116,67 @@ function useDashboard(
       }
     },
     [hostId, rpc],
+  );
+
+  useEffect(() => {
+    void load("initial");
+  }, [load]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load("refresh");
+    }, pollMs);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void load("refresh");
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [load, pollMs]);
+
+  return { data, error, loading, refreshing, reload: () => load("force") };
+}
+
+type SubscriptionsReadback = {
+  fetchedAt: string;
+  subscriptions: Subscription[];
+};
+
+/**
+ * The plans themselves, one per provider + account across every machine. This
+ * is what the owner pays for; the per-machine cards below it are where each
+ * plan can be read from.
+ */
+function useSubscriptions(options?: { pollMs?: number }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const pollMs = options?.pollMs ?? REFRESH_MS;
+  const [data, setData] = useState<SubscriptionsReadback | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(
+    async (mode: "initial" | "refresh" | "force" = "refresh") => {
+      if (mode === "initial") setLoading(true);
+      else setRefreshing(true);
+      try {
+        const next = await rpc.call("getSubscriptions", {
+          force: mode === "force",
+        });
+        setData(next as SubscriptionsReadback);
+        setError(null);
+      } catch (cause) {
+        setError(
+          cause instanceof Error ? cause.message : "Could not load subscriptions.",
+        );
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [rpc],
   );
 
   useEffect(() => {
@@ -942,6 +1008,124 @@ function FreeTokensSection() {
   );
 }
 
+const PROVIDER_NAME: Record<Subscription["providerId"], string> = {
+  codex: "Codex",
+  "claude-code": "Claude Code",
+};
+
+function subscriptionStatusLine(plan: Subscription): string {
+  if (plan.status === "unknown") return "No reading yet";
+  if (plan.readFrom === null) return statusLabel(plan.status);
+  const when = formatFetchedAt(plan.readFrom.checkedAt);
+  return plan.status === "ok"
+    ? `Read ${when} on ${plan.readFrom.machineName}`
+    : `Last known · read ${when} on ${plan.readFrom.machineName}`;
+}
+
+function SubscriptionsSection() {
+  const { data, error, loading, refreshing, reload } = useSubscriptions();
+  return (
+    <Card className="shadow-none">
+      <CardHeader className="flex flex-row items-start justify-between gap-3 space-y-0 p-5 pb-4">
+        <div>
+          <CardTitle className="text-base">Subscriptions</CardTitle>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Each plan once, read from whichever machine can see it; a machine
+            that has lost its sign-in is listed, not mistaken for an empty plan
+          </p>
+        </div>
+        <button
+          type="button"
+          title={
+            refreshing
+              ? "Refreshing…"
+              : data
+                ? `Updated ${formatFetchedAt(data.fetchedAt)}`
+                : "Refresh"
+          }
+          className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => void reload()}
+        >
+          <HugeiconsIcon
+            icon={RefreshIcon}
+            className={cn("size-3.5", refreshing && "animate-spin")}
+          />
+          Refresh
+        </button>
+      </CardHeader>
+      <CardContent className="divide-y divide-border p-0" aria-busy={loading && !data}>
+        {loading && !data ? (
+          <ProviderLimitsSkeleton />
+        ) : error && !data ? (
+          <div className="space-y-3 p-5 text-sm text-muted-foreground">
+            <p>{error}</p>
+            <Button size="sm" variant="outline" onClick={() => void reload()}>
+              Try again
+            </Button>
+          </div>
+        ) : data && data.subscriptions.length === 0 ? (
+          <p className="p-5 text-sm text-muted-foreground">
+            No signed-in plan has reported yet on any machine.
+          </p>
+        ) : data ? (
+          data.subscriptions.map((plan) => {
+            const hero = subscriptionHero(plan);
+            const trouble = plan.machines.filter((machine) => machine.status !== "ok");
+            return (
+              <div
+                key={plan.key}
+                className="flex flex-col gap-4 p-5 md:flex-row md:items-start md:gap-6"
+              >
+                <div className="flex min-w-0 shrink-0 items-center gap-3 md:w-60">
+                  <ProviderMark name={PROVIDER_NAME[plan.providerId]} logoUrl={null} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">
+                      {PROVIDER_NAME[plan.providerId]}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {[plan.planLabel, plan.accountEmail].filter(Boolean).join(" · ")}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {subscriptionStatusLine(plan)}
+                    </p>
+                  </div>
+                  {hero ? (
+                    <Gauge remainingPercent={hero.remainingPercent} size={56} />
+                  ) : null}
+                </div>
+                <div className="min-w-0 flex-1 space-y-4">
+                  {plan.windows.length > 0 ? (
+                    plan.windows.map((window, index) => (
+                      <UsageBar
+                        key={`${window.label}-${window.resetsAt ?? index}`}
+                        window={window}
+                      />
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      No machine has read this plan yet.
+                    </p>
+                  )}
+                  {trouble.length > 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      {trouble
+                        .map(
+                          (machine) =>
+                            `${machine.machineName}: ${statusLabel(machine.status)}`,
+                        )
+                        .join(" · ")}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            );
+          })
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 /**
  * One machine's plan limits. Each instance loads its own machine, so the page
  * shows every machine at once instead of making the owner switch between them
@@ -1002,6 +1186,7 @@ function DashboardPage() {
         <LiveThroughputSection />
         <FreeTokensSection />
         <TokenUsageSection />
+        <SubscriptionsSection />
 
         {shown.length === 0 ? (
           <MachineLimits hostId={null} name={null} onHosts={onHosts} />
@@ -1021,8 +1206,8 @@ function DashboardPage() {
 }
 
 function HomepageUsage() {
-  const { data, loading } = useDashboard(null, { pollMs: BACKGROUND_REFRESH_MS });
-  const cards = useMemo(() => data?.providers ?? [], [data]);
+  const { data, loading } = useSubscriptions({ pollMs: BACKGROUND_REFRESH_MS });
+  const plans = useMemo(() => data?.subscriptions ?? [], [data]);
 
   if (loading && !data) {
     return <HomepageUsageSkeleton />;
@@ -1030,23 +1215,32 @@ function HomepageUsage() {
   if (!data) return null;
 
   return (
-    <div className="grid gap-3 sm:grid-cols-3">
-      {cards.map((provider) => {
-        const hero = provider.windows[0];
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {plans.map((plan) => {
+        const hero = subscriptionHero(plan);
+        const name = PROVIDER_NAME[plan.providerId];
         return (
-          <Card key={provider.id} className="shadow-none">
+          <Card key={plan.key} className="shadow-none">
             <CardContent className="flex items-center gap-3 p-4">
               {hero ? (
                 <Gauge remainingPercent={hero.remainingPercent} size={60} />
               ) : (
-                <ProviderMark name={provider.displayName} logoUrl={provider.logoUrl} />
+                <ProviderMark name={name} logoUrl={null} />
               )}
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{provider.displayName}</p>
+                <p className="truncate text-sm font-medium">
+                  {name}
+                  {plan.status === "stale" ? (
+                    <span className="ml-1 text-xs font-normal text-muted-foreground">
+                      last known
+                    </span>
+                  ) : null}
+                </p>
+                <p className="truncate text-xs text-muted-foreground">{plan.accountEmail}</p>
                 <p className="truncate text-xs text-muted-foreground">
                   {hero
                     ? `${hero.label} · ${formatPercent(hero.remainingPercent)} left`
-                    : statusLabel(provider.status)}
+                    : subscriptionStatusLine(plan)}
                 </p>
               </div>
             </CardContent>
@@ -1058,13 +1252,16 @@ function HomepageUsage() {
 }
 
 function SidebarAccessory() {
-  const { data } = useDashboard(null, { pollMs: BACKGROUND_REFRESH_MS });
-  const remaining = data?.totals.cumulativeRemainingPercent;
-  if (remaining === null || remaining === undefined) {
+  const { data } = useSubscriptions({ pollMs: BACKGROUND_REFRESH_MS });
+  const tightest = data ? tightestSubscription(data.subscriptions) : null;
+  if (!data) {
     return <Skeleton className="inline-block h-3 w-8 align-middle" />;
   }
+  if (tightest === null) return null;
+  const remaining = tightest.window.remainingPercent;
   return (
     <span
+      title={`${PROVIDER_NAME[tightest.subscription.providerId]} · ${tightest.subscription.accountEmail} · ${tightest.window.label}`}
       className={cn(
         "text-xs font-medium tabular-nums",
         toneText(remainingTone(remaining)),

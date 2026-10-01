@@ -5,16 +5,26 @@ description: Inspect remaining provider subscription usage, plans, reset windows
 
 # Usage dashboard
 
-Run `bb usage` (or `bb usage --json`) to read live subscription windows
-and token totals from this machine.
+Run `bb usage subscriptions --json` to see every paid plan once — provider +
+account across all paired machines — with its live or last-known quota. Run
+`bb usage --machine <id-or-name>` for one machine. Bare `bb usage` prints the
+plans first and then the BB server's own limits, which are not a paired
+machine's.
 
 ```bash
+bb usage subscriptions --json # each plan once: status ok|stale|unknown, windows, readFrom, machines[]
 bb usage
 bb usage --json
 bb usage live                 # tokens per minute right now, by provider and thread
 bb usage tokens --days 30
 bb usage --machine <id-or-name>
+bb usage accounts --json      # raw per-machine rows, local auth state included
 ```
+
+In `subscriptions[]`, `status: "stale"` means the shown windows are the last
+successful reading (`readFrom.checkedAt` says when); `machines[]` carries each
+machine's own state (`unauthenticated`, `expired`, `unknown`) and is not the
+plan's quota. An exhausted plan is `ok` with `remainingPercent: 0`.
 
 Use `totals.cumulativeRemainingPercent` for remaining quota across signed-in
 providers, `totals.tightest` for the most exhausted window, and each provider
