@@ -238,3 +238,48 @@ test("last-good quota from one machine is never overlaid onto another", async ()
     await harness.lifecycle.dispose();
   }
 });
+
+test("subscriptions CLI lists each plan once across machines and keeps the last reading when auth lapses", async () => {
+  let claudeTwo = () => claudeResult("host-2");
+  const harness = await setup({
+    callHostRpc: ({ hostId }) =>
+      hostId === "host-2" ? claudeTwo() : claudeResult(hostId),
+  });
+  try {
+    const first = await harness.behavior.runCli(["subscriptions", "--json", "--force"]);
+    assert.equal(first.exitCode, 0);
+    const plans = JSON.parse(first.stdout).subscriptions;
+    assert.deepEqual(
+      plans.map((plan) => [plan.key, plan.status, plan.windows[0]?.remainingPercent ?? null]),
+      [
+        ["claude-code:claude-one@example.test", "unknown", null],
+        ["claude-code:claude-two@example.test", "ok", 0],
+        ["codex:codex-one@example.test", "ok", 38],
+        ["codex:codex-two@example.test", "ok", 3],
+      ],
+    );
+    const one = plans.find((plan) => plan.key === "claude-code:claude-one@example.test");
+    assert.deepEqual(one.machines.map((m) => [m.machineId, m.status]), [["host-1", "unauthenticated"]]);
+
+    // The PC loses its Claude login: the plan stays, its last reading marked stale,
+    // and the machine's own state is shown as what it is.
+    claudeTwo = () => ({ ...claudeResult("host-2"), status: "expired", windows: [] });
+    const second = await harness.behavior.runCli(["subscriptions", "--json", "--force"]);
+    const two = JSON.parse(second.stdout).subscriptions.find(
+      (plan) => plan.key === "claude-code:claude-two@example.test",
+    );
+    assert.equal(two.status, "stale");
+    assert.equal(two.windows[0].remainingPercent, 0);
+    assert.equal(two.readFrom.machineId, "host-2");
+    assert.deepEqual(two.machines.map((m) => m.status), ["expired"]);
+
+    // Bare `bb usage` leads with the plans and no longer labels the server's
+    // own disk with a paired machine's name.
+    const bare = await harness.behavior.runCli(["--force"]);
+    assert.match(bare.stdout, /^Subscriptions · /);
+    assert.match(bare.stdout, /Usage · BB server/);
+    assert.doesNotMatch(bare.stdout, /Usage · PC 1/);
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});

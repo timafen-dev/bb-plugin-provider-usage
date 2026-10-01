@@ -453,10 +453,14 @@ export function assembleDashboard(input: {
 }
 
 export function formatDashboardText(snapshot: DashboardSnapshot): string {
+  // Without a machine the numbers come from the BB server's own disk, which is
+  // not any paired machine; naming the first one here would put another
+  // computer's label on them.
   const host =
-    snapshot.hosts.find((row) => row.id === snapshot.hostId)?.name ??
-    snapshot.hosts[0]?.name ??
-    "Primary machine";
+    snapshot.hostId === null
+      ? "BB server (its own disk; pass --machine for a paired machine)"
+      : (snapshot.hosts.find((row) => row.id === snapshot.hostId)?.name ??
+        "Unknown machine");
 
   const lines = [
     `Usage · ${host}`,
