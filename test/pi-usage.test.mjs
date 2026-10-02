@@ -698,6 +698,18 @@ test("a successful retry removes the note, and the reader observes the recovery"
   assert.equal(recovered.data.retained, false);
 });
 
+test("a poll that never reached the location cannot announce a recovery", () => {
+  // No artifact and no note were seen at all. The absence of a note here is
+  // "nothing was looked at", not "the retry succeeded".
+  const reading = readPiUsage({
+    failedBefore: true,
+    unavailable: { reason: "owning_host_offline", detail: "the approved machine is offline" },
+    nowMs: generatedAtMs + 1_000,
+  });
+  assert.equal(reading.status, "unavailable");
+  assert.equal(reading.recoveredFromFailure, false);
+});
+
 /* --------------------------------------------------------------- window and time */
 
 test("the window is half open, and an inverted one is refused", () => {

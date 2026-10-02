@@ -70,6 +70,8 @@ import {
   shouldReuseCachedLimits,
 } from "./lib/limits-cache";
 import { normalizeProviderLimits } from "./lib/provider-limits";
+import { piReadingSchema } from "./lib/pi-usage-contract";
+import { createPiUsageReader } from "./lib/pi-usage-poll";
 
 const usageWindowSchema = z.object({
   label: z.string(),
@@ -277,6 +279,21 @@ export const rpcContract = defineRpcContract({
   getThroughput: {
     input: z.null(),
     output: throughputSnapshotSchema,
+  },
+  /**
+   * One read of the Firstmate Pi snapshot, as a separate source.
+   *
+   * The input is `null` on purpose: there is no path, root, command or machine
+   * selector a caller may supply, because the location is compiled into
+   * `lib/pi-usage-source.ts` and the owning machine is chosen by the server
+   * from its own approved list. Nothing here touches the native datasets — Pi
+   * figures are never added to BB totals and never read as subscription
+   * consumption — and nothing here is live: the read happens when the page
+   * asks, with no timer and no background service of its own.
+   */
+  getExternalPiUsage: {
+    input: z.null(),
+    output: piReadingSchema,
   },
 });
 
@@ -1339,6 +1356,27 @@ export default async function plugin(bb: BbPluginApi) {
     return { configured: true, secondsUntilReset: secondsUntilReset(now), accounts: rows };
   };
 
+  /**
+   * The Firstmate Pi read, asked of the one approved owning machine.
+   *
+   * Two facts live between polls — the last snapshot actually read and whether
+   * the last poll saw a producer failure note — and nothing else: every poll
+   * replaces the dataset rather than adding to it, so asking twice yields the
+   * same totals. The memory is in process only; a restart simply has no
+   * last-good figures to show, which is an honest state rather than a zero.
+   */
+  const piHosts = bb.hosts.experimental_client({ contract: hostContract });
+  const piUsage = createPiUsageReader({
+    hosts: async () =>
+      (await bb.sdk.hosts.list()).map((host) => ({
+        id: host.id,
+        name: host.name,
+        status: host.status,
+      })),
+    read: (hostId) => piHosts.call("externalPiUsage", null, { hostId }),
+    nowMs: () => Date.now(),
+  });
+
   bb.rpc.register(freeTokensContract, {
     async freeTokens() {
       return readFreeTokens();
@@ -1354,6 +1392,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     async getThroughput() {
       return throughput.snapshot();
+    },
+    async getExternalPiUsage() {
+      return piUsage.read();
     },
   });
 

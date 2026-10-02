@@ -1015,7 +1015,9 @@ export function readPiUsageFacts(input: PiReadFacts): PiReading {
         input.unavailable?.detail ??
         "the approved owning machine for Firstmate Pi is not available",
       data: retainedData(input.retained, input.nowMs, grace),
-      recoveredFromFailure,
+      // A poll that never reached the export location observed nothing, so it
+      // cannot report that the producer's retry succeeded either.
+      recoveredFromFailure: false,
     };
   }
 
@@ -1188,3 +1190,57 @@ export function piCostAgrees(amount: PiMoney): boolean {
   const rounded = piDecimal(amount.known_cost_usd);
   return exact !== null && rounded !== null && piDecimalEquals(exact, rounded);
 }
+
+/* ------------------------------------------------------- the reading on wire */
+
+/**
+ * A reading, as the server hands it to the page.
+ *
+ * Validating the reading itself — and not only the artifact it came from — is
+ * what keeps the panel's own hop honest: the status stays one of the named
+ * states so a client cannot be handed something it will treat as "no usage",
+ * the figures stay the producer's validated snapshot rather than loose JSON,
+ * and `strict()` means a field nobody agreed on cannot ride along to the UI.
+ */
+export const piFreshnessSchema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("fresh"), ageSeconds: z.number() }).strict(),
+  z.object({ state: z.literal("stale"), ageSeconds: z.number() }).strict(),
+  z.object({ state: z.literal("future"), aheadSeconds: z.number() }).strict(),
+]);
+
+export const piReadingSchema = z
+  .object({
+    status: z.enum([
+      "ok",
+      "stale",
+      "future",
+      "unavailable",
+      "missing",
+      "invalid",
+      "failed",
+    ]),
+    reason: z.string().min(1).max(200),
+    detail: z.string().min(1).max(500),
+    data: z
+      .object({
+        snapshot: piSnapshotSchema,
+        freshness: piFreshnessSchema,
+        degraded: z.boolean(),
+        retained: z.boolean(),
+      })
+      .strict()
+      .nullable(),
+    recoveredFromFailure: z.boolean(),
+  })
+  .strict();
+
+export type PiReadingWire = z.infer<typeof piReadingSchema>;
+
+/**
+ * The wire shape and the in-process type must stay the same thing in both
+ * directions, or a state the reader can produce would be rejected at the hop
+ * — which would turn a readable failure into an unexplained one.
+ */
+type PiAssignable<Target, Source extends Target> = [Target, Source];
+type _PiWireIsReading = PiAssignable<PiReading, PiReadingWire>;
+type _PiReadingIsWire = PiAssignable<PiReadingWire, PiReading>;

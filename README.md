@@ -262,6 +262,35 @@ No session, transcript, credential or auth store is opened anywhere on this
 path, and a refusal travels as a stable code with fixed wording — never a path,
 a home directory, a machine name or an exception message.
 
+### How the page asks for it
+
+The page reads Pi through one server RPC, `getExternalPiUsage`, whose input is
+also **`null`** — the same reason as the host read: no path, no root, no command
+and no machine selector is expressible, so the only thing a caller can ask is
+"what does the one approved location hold right now". Its output is the
+validated *reading*: a named state (`ok`, `stale`, `future`, `unavailable`,
+`missing`, `invalid`, `failed`), a stable reason code, sanitized wording, and
+either the producer's schema-checked snapshot or `null` — never loose JSON and
+never a zero stand-in. A machine answering with a read this plugin does not
+understand is reported as incompatible rather than half-understood.
+
+Exactly two facts live between one read and the next: the last snapshot actually
+read, and whether the last poll that reached the location saw a producer failure
+note. Nothing else crosses — no running totals, no counters, no merged
+snapshots — so asking twice yields the same figures. Remembering the failure note
+is what lets a successful retry be *observed*: only the real absence of a note
+clears it, while a read that never reached the location leaves the previous
+verdict standing and reports no recovery. The memory is in process only, so a
+restart simply has no last-good figures to show, which is an honest unavailable
+state rather than a zero. Two asks arriving together share one read: a
+replacement dataset read twice at the same instant is the same dataset, and two
+races would each overwrite what the other observed — including a failure note
+that had just been cleared.
+
+Native RPCs are untouched: `getDashboard`, `getTokens`, `getThroughput` and the
+free-tokens read return exactly what they did before, and no Pi figure enters any
+of them.
+
 ### Activation is a separate, approved step
 
 This is **implementation-ready, not installed and not live**. Reading a snapshot
