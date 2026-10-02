@@ -94,14 +94,24 @@ function usePiUsage() {
       if (!alive.current) return;
       // Replacement, not accrual.
       setReading(next as PiReading);
-      setNowMs(Date.now());
       setFailed(false);
     } catch {
       if (!alive.current) return;
       setFailed(true);
+      setReading((previous) => previous ? {
+        ...previous,
+        status: "unavailable",
+        reason: "client_read_failed",
+        detail: "The latest read failed; retained figures are not current.",
+        data: previous.data ? { ...previous.data, degraded: true, retained: true } : null,
+        recoveredFromFailure: false,
+      } : null);
     } finally {
       inflight.current = false;
-      if (alive.current) setLoading(false);
+      if (alive.current) {
+        setNowMs(Date.now());
+        setLoading(false);
+      }
     }
   }, [rpc]);
 
@@ -110,16 +120,17 @@ function usePiUsage() {
   }, [load]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void load();
-    }, POLL_MS);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void load();
+    const tick = () => {
+      if (document.visibilityState === "visible") {
+        setNowMs(Date.now());
+        void load();
+      }
     };
-    document.addEventListener("visibilitychange", onVisible);
+    const timer = window.setInterval(tick, POLL_MS);
+    document.addEventListener("visibilitychange", tick);
     return () => {
       window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("visibilitychange", tick);
     };
   }, [load]);
 

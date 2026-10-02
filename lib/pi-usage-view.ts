@@ -22,9 +22,8 @@ import {
   PI_FOLDED_MODEL,
   PI_FOLDED_ROW,
   PI_MAIN_UNASSIGNED,
-  isPiSafeLink,
-  piCostAgrees,
   piExactCost,
+  piFreshness,
   piHourOffset,
   piHourRfc3339,
   piSpendIsKnown,
@@ -77,7 +76,7 @@ export const PI_LENSES: readonly PiLensOption[] = [
 ];
 
 export function piLensOption(lens: PiLens): PiLensOption {
-  return PI_LENSES.find((option) => option.id === lens) ?? PI_LENSES[0]!;
+  return PI_LENSES.find((option) => option.id === lens)!;
 }
 
 export function piLensIsNative(lens: PiLens): boolean {
@@ -172,8 +171,6 @@ export interface PiMoneyView {
   invalidCostCalls: number;
   /** `1 of 3 calls priced · 2 missing a price`, or the no-call wording. */
   coverageText: string;
-  /** Whether the producer's rounded figure matches its exact companion. */
-  agrees: boolean;
   /** True when some call's recorded cost was itself unusable. */
   hasInvalid: boolean;
 }
@@ -217,7 +214,6 @@ export function piMoneyView(amount: PiMoney): PiMoneyView {
     missingCostCalls: amount.missing_cost_calls,
     invalidCostCalls: amount.invalid_cost_calls,
     coverageText,
-    agrees: piCostAgrees(amount),
     hasInvalid: amount.invalid_cost_calls > 0,
   };
 }
@@ -345,9 +341,7 @@ function taskRows(snapshot: PiUsageSnapshot): PiRowView[] {
         : task.task_key === PI_MAIN_UNASSIGNED
           ? "MAIN work with no proved task binding"
           : (label?.title ?? null),
-      // A label is validated upstream, and checked again here: a row renders
-      // a link only when the link is one of the approved shapes.
-      links: folded ? [] : (label?.urls.filter(isPiSafeLink) ?? []),
+      links: folded ? [] : (label?.urls ?? []),
     });
   });
 }
@@ -868,9 +862,21 @@ export function piUsageView(reading: PiReading | null, nowMs: number): PiUsageVi
     };
   }
 
+  const snapshot = reading.data?.snapshot ?? null;
+  const freshness = snapshot ? piFreshness(snapshot.generated_at, nowMs) : null;
+  const effectiveStatus = reading.status === "ok" || reading.status === "stale" || reading.status === "future"
+    ? freshness?.state === "fresh" ? "ok" : freshness?.state === "future" ? "future" : "stale"
+    : reading.status;
+  reading = {
+    ...reading,
+    status: effectiveStatus,
+    data: reading.data && freshness ? {
+      ...reading.data,
+      freshness,
+      degraded: reading.data.degraded || freshness.state !== "fresh",
+    } : null,
+  };
   const data = reading.data;
-  const snapshot = data?.snapshot ?? null;
-  const freshness = data?.freshness ?? null;
   const ageSeconds =
     freshness === null
       ? null

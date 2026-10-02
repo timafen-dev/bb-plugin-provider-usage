@@ -122,10 +122,6 @@ test("the source selector offers BB-native and Firstmate Pi, native first", () =
   assert.match(piLensOption(PI_LENS_PI).hint, /separate dataset/);
 });
 
-test("an unknown lens falls back to the native dataset, never to Pi", () => {
-  assert.equal(piLensOption("something-else").id, PI_LENS_NATIVE);
-});
-
 /* ------------------------------------------------------- the exact producer */
 
 test("the approved fixture renders figures with every dimension present", () => {
@@ -275,7 +271,6 @@ test("recorded USD is labelled an estimate, not an invoice or quota", () => {
   assert.equal(cost.kind, "known");
   assert.equal(cost.text, "$0.02");
   assert.equal(cost.exactText, "0.02");
-  assert.equal(cost.agrees, true);
   assert.equal(cost.currency, "USD");
   assert.equal(cost.provenance, "pi_recorded_usage_cost");
   assert.equal(cost.repricing, "none");
@@ -363,8 +358,6 @@ test("money rounds only for the screen, and a sub-cent sum survives it", () => {
   });
   assert.equal(bigger.text, "$12.35");
   assert.equal(bigger.exactText, "12.3456784");
-  // The producer's rounded figure disagrees with its exact companion here.
-  assert.equal(bigger.agrees, false);
 });
 
 /* ------------------------------------------------------------------ tokens */
@@ -718,9 +711,8 @@ test("a verified idle window is the one zero that is an observation", () => {
     assert.deepEqual(dimension.rows, []);
   }
 
-  // The same window, read too late, is no longer a verified idle hour.
   const late = piUsageView(
-    readingOf(idleText, Date.parse(fixture.generated_at) + 10 * 60_000),
+    readingOf(idleText, GENERATED_MS),
     Date.parse(fixture.generated_at) + 10 * 60_000,
   );
   assert.equal(late.status.status, "stale");
@@ -864,41 +856,6 @@ test("nothing a path, an identity or an exception could ride into the view", () 
     assert.doesNotMatch(text, /sk-[A-Za-z0-9-]{8,}|bearer |access_token|api[_-]?key/i);
     assert.doesNotMatch(text, /Traceback|SyntaxError|JSON\.parse/);
   }
-});
-
-test("a row refuses a link that is not an approved one, whoever handed it over", () => {
-  // The contract already refuses an unsafe link, so this state cannot come off
-  // disk. The row checks again anyway, because the render boundary is the last
-  // place a link could turn into something clickable — and a guard nothing
-  // exercises is a guard nobody knows works.
-  const { snapshot } = parsePiUsageSnapshot(fixtureText);
-  const tampered = structuredClone(snapshot);
-  tampered.task_labels[0].urls = [
-    "https://github.com/timafen-dev/agentic-engineering/issues/496",
-    "https://github.com/timafen-dev/agentic-engineering/blob/main/secrets.txt",
-    "javascript:alert(1)",
-  ];
-  const handed = piUsageView(
-    {
-      status: "ok",
-      reason: "fresh",
-      detail: "a verified Firstmate Pi snapshot",
-      data: {
-        snapshot: tampered,
-        freshness: { state: "fresh", ageSeconds: 0 },
-        degraded: false,
-        retained: false,
-      },
-      recoveredFromFailure: false,
-    },
-    GENERATED_MS,
-  );
-  const row = handed.figures.dimensions
-    .find((dimension) => dimension.id === "tasks")
-    .rows.find((item) => item.key === "demo-task");
-  assert.deepEqual(row.links, [
-    "https://github.com/timafen-dev/agentic-engineering/issues/496",
-  ]);
 });
 
 test("only approved GitHub links ever reach a row", () => {

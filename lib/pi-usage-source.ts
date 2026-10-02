@@ -160,7 +160,11 @@ async function readConfinedFile(path: string, maxBytes: number): Promise<PiFileR
       bytes += bytesRead;
     }
     if (bytes > maxBytes) return { state: "refused", refusal: "too_large" };
-    return { state: "text", text: buffer.subarray(0, bytes).toString("utf8"), bytes };
+    return {
+      state: "text",
+      text: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, bytes)),
+      bytes,
+    };
   } catch {
     return { state: "refused", refusal: "unreadable" };
   } finally {

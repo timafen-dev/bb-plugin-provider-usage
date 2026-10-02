@@ -1,15 +1,13 @@
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { slicesFromScan, type MachineTokens } from "./machine-tokens";
+import { MACHINE_TOKENS_FRESH_MS, slicesFromScan, type MachineTokens } from "./machine-tokens";
 import {
   scanTokenFiles,
   type FileCacheEntry,
   type FileScanResult,
 } from "./token-scan";
 
-/** A scan younger than this is answered as is. */
-const FRESH_MS = 2 * 60_000;
 /** How long a caller waits for a refresh before getting the previous answer. */
 const WAIT_MS = 20_000;
 
@@ -107,7 +105,8 @@ export function createHostTokenHistory(options: {
       if (
         last &&
         !input.force &&
-        now() - Date.parse(last.scannedAt) < FRESH_MS
+        now() - Date.parse(last.scannedAt) >= 0 &&
+        now() - Date.parse(last.scannedAt) < MACHINE_TOKENS_FRESH_MS
       ) {
         return last;
       }

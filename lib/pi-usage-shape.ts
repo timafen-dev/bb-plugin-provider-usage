@@ -1,9 +1,7 @@
 /**
  * The parts of the Firstmate Pi contract the page itself needs: the producer's
  * fixed identities, the only link shape that is ever clickable, how an
- * offset-bearing hour identity is normalized, and the two questions about money
- * whose wrong answer is a lie — is this sum known, and does it agree with the
- * digits the producer summed.
+ * offset-bearing hour identity is normalized, and whether a sum is known.
  *
  * These live apart from `pi-usage-contract.ts` for one concrete reason: that
  * module builds the snapshot's zod schemas, and the page has no use for them —
@@ -18,7 +16,7 @@
 
 import {
   piDecimal,
-  piDecimalEquals,
+  piDecimalIsZero,
   type PiDecimal,
 } from "./pi-usage-decimal";
 
@@ -111,11 +109,51 @@ export function piExactCost(amount: PiMoneyShape): PiDecimal {
   return piDecimal(amount.known_cost_usd_exact) ?? { units: 0n, scale: 0 };
 }
 
-/** Whether the producer's rounded figure agrees with its exact companion. */
-export function piCostAgrees(amount: PiMoneyShape): boolean {
-  const exact = piDecimal(amount.known_cost_usd_exact);
-  const rounded = piDecimal(amount.known_cost_usd);
-  return exact !== null && rounded !== null && piDecimalEquals(exact, rounded);
+export type PiFreshness =
+  | { state: "fresh"; ageSeconds: number }
+  | { state: "stale"; ageSeconds: number }
+  | { state: "future"; aheadSeconds: number };
+
+export function piFreshness(
+  generatedAt: string,
+  nowMs: number,
+  graceSeconds = PI_GRACE_SECONDS,
+): PiFreshness {
+  const ms = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(generatedAt)
+    ? Date.parse(generatedAt)
+    : NaN;
+  if (!Number.isFinite(ms)) return { state: "stale", ageSeconds: Infinity };
+  const ageSeconds = (nowMs - ms) / 1000;
+  if (ageSeconds < -PI_FUTURE_SKEW_SECONDS) {
+    return { state: "future", aheadSeconds: -ageSeconds };
+  }
+  const age = Math.max(0, ageSeconds);
+  return age > graceSeconds
+    ? { state: "stale", ageSeconds: age }
+    : { state: "fresh", ageSeconds: age };
+}
+
+interface PiTokensShape {
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  reasoning: number;
+}
+
+interface PiAmountShape extends PiMoneyShape {
+  tokens: PiTokensShape;
+}
+
+function zeroTokens(tokens: PiTokensShape): boolean {
+  return Object.values(tokens).every((value) => value === 0);
+}
+
+function zeroMoney(amount: PiMoneyShape): boolean {
+  return amount.calls === 0 && amount.priced_calls === 0 &&
+    amount.missing_cost_calls === 0 && amount.invalid_cost_calls === 0 &&
+    amount.token_field_gaps === 0 &&
+    piDecimalIsZero(piExactCost(amount));
 }
 
 /**
@@ -136,13 +174,26 @@ export interface PiIdleReadingShape {
         invalid_rows: number;
         never_ingested: number;
         partial: number;
+        pending_tails: number;
+        readable: number;
+        sources: { alias: string; status: string; entries_in_window: number }[];
         status: string;
         token_field_gaps: number;
         unreadable: number;
         unreadable_paths: number;
         verified_idle_zero: number;
       };
-      cost: { calls: number };
+      cost: PiMoneyShape;
+      tokens: PiTokensShape;
+      quarantine: unknown[];
+      tasks: PiAmountShape[];
+      roles: PiAmountShape[];
+      requested_models: PiAmountShape[];
+      work_items: PiAmountShape[];
+      main_unassigned: PiAmountShape;
+      days: PiAmountShape[];
+      hours: PiAmountShape[];
+      live_bins: { bins: PiAmountShape[] };
     };
   } | null;
 }
@@ -157,11 +208,24 @@ export interface PiIdleReadingShape {
 export function piVerifiedIdleZero(reading: PiIdleReadingShape): boolean {
   if (reading.status !== "ok" || reading.data === null) return false;
   if (reading.data.degraded || reading.data.retained) return false;
-  const { coverage, cost } = reading.data.snapshot;
+  const snapshot = reading.data.snapshot;
+  const { coverage, cost } = snapshot;
+  const amounts = [
+    ...snapshot.tasks, ...snapshot.roles, ...snapshot.requested_models,
+    ...snapshot.work_items, snapshot.main_unassigned, ...snapshot.days,
+    ...snapshot.hours, ...snapshot.live_bins.bins,
+  ];
   return (
     coverage.status === "verified_idle_zero" &&
     coverage.declared_sources > 0 &&
     coverage.verified_idle_zero === coverage.declared_sources &&
+    coverage.sources.length === coverage.declared_sources &&
+    new Set(coverage.sources.map((source) => source.alias)).size === coverage.declared_sources &&
+    coverage.sources.every((source) =>
+      source.status === "verified_idle_zero" && source.entries_in_window === 0) &&
+    coverage.readable === 0 &&
+    coverage.pending_tails === 0 &&
+    snapshot.quarantine.length === 0 &&
     coverage.unreadable === 0 &&
     coverage.unreadable_paths === 0 &&
     coverage.never_ingested === 0 &&
@@ -173,6 +237,7 @@ export function piVerifiedIdleZero(reading: PiIdleReadingShape): boolean {
     coverage.token_field_gaps === 0 &&
     coverage.assistant_without_usage === 0 &&
     coverage.invalid_rows === 0 &&
-    cost.calls === 0
+    zeroMoney(cost) && zeroTokens(snapshot.tokens) &&
+    amounts.every((amount) => zeroMoney(amount) && zeroTokens(amount.tokens))
   );
 }

@@ -38,7 +38,7 @@ const {
   PI_ROLES,
   isPiSafeLink,
   parsePiUsageSnapshot,
-  piCostAgrees,
+  piReadingSchema,
   piExactCost,
   piFreshness,
   piHourInstantMs,
@@ -267,7 +267,6 @@ test("known USD stays exact as digits and rounds only for rendering", () => {
   const snapshot = accepted();
   assert.equal(snapshot.cost.known_cost_usd_exact, "0.02");
   assert.equal(snapshot.cost.known_cost_usd, "0.020000");
-  assert.ok(piCostAgrees(snapshot.cost));
   // Rendering rounds; the exact companion is untouched.
   const exact = piExactCost(snapshot.cost);
   assert.equal(piDecimalText(exact), "0.02");
@@ -575,6 +574,31 @@ test("an idle claim contradicted by its own counters is not believed", () => {
   const now = generatedAtMs + 1_000;
   const contradictions = [
     ["a token field gap", (s) => (s.coverage.token_field_gaps = 1)],
+    ["a pending tail", (s) => (s.coverage.pending_tails = 1)],
+    ["quarantine", (s) => s.quarantine.push({ source: "S01", ordinal: 1 })],
+    ["a missing source record", (s) => s.coverage.sources.pop()],
+    ["a readable source", (s) => (s.coverage.sources[0].status = "readable")],
+    ["a source entry", (s) => (s.coverage.sources[0].entries_in_window = 1)],
+    ...["input", "output", "cache_read", "cache_write", "reasoning"].map((field) =>
+      [`nonzero ${field}`, (s) => {
+        s.tokens[field] = 1;
+        if (field === "reasoning") s.tokens.output = 1;
+      }],
+    ),
+    ...["tasks", "roles", "requested_models", "work_items", "main_unassigned", "days", "hours", "live"].flatMap((dimension) =>
+      ["calls", "tokens"].map((kind) => [`${dimension} ${kind}`, (s) => {
+        const amount = zeroAmount();
+        if (kind === "calls") { amount.calls = 1; amount.missing_cost_calls = 1; }
+        else amount.tokens.input = 1;
+        if (dimension === "main_unassigned") s.main_unassigned = amount;
+        else if (dimension === "roles") Object.assign(s.roles[0], amount);
+        else if (dimension === "live") s.live_bins.bins = [{ ...amount, bin_start: "2026-10-01T22:50:00Z" }];
+        else {
+          const identity = { tasks: ["task_key", "demo"], requested_models: ["requested_model", "model"], work_items: ["work_item", "demo · author"], days: ["day", "2026-10-01"], hours: ["hour", "2026-10-01T22+00:00"] }[dimension];
+          s[dimension] = [{ ...amount, [identity[0]]: identity[1] }];
+        }
+      }]),
+    ),
     ["an unreadable path", (s) => (s.coverage.unreadable_paths = 1)],
     ["a response without usage", (s) => (s.coverage.assistant_without_usage = 1)],
     ["an invalid row", (s) => (s.coverage.invalid_rows = 1)],
@@ -1041,6 +1065,39 @@ test("no rejection message repeats the content that caused it", () => {
   const rejected = parseObject(snapshot);
   assert.equal(rejected.ok, false);
   assert.ok(!rejected.detail.includes("sk-ant-api03-supersecret"));
+});
+
+test("quarantine diagnostic paths never echo rejected keys", () => {
+  for (const key of ["/home/owner/private-session.jsonl", "access_token", "owner@example.invalid"]) {
+    for (const value of [1, {}]) {
+      const snapshot = clone();
+      snapshot.quarantine = [{ [key]: value }];
+      const verdict = parseObject(snapshot);
+      assert.equal(verdict.ok, false);
+      assert.equal(verdict.reason, typeof value === "number" ? "privacy" : "schema");
+      assert.ok(!verdict.detail.includes(key));
+      assert.match(verdict.detail, /quarantine/);
+    }
+  }
+});
+
+test("complete refusals and prefixed failure reasons fit the reading wire", () => {
+  const snapshot = clone();
+  snapshot.live_bins.bins = Array.from({ length: 8 }, (_, index) => ({
+    ...zeroAmount(),
+    bin_start: `2026-10-01T22:50:${String(index * 10 % 60).padStart(2, "0")}Z`,
+    tokens: { ...zeroAmount().tokens, reasoning: 1 },
+  }));
+  const rejected = readPiUsage({ text: JSON.stringify(snapshot), nowMs: generatedAtMs });
+  assert.equal(rejected.status, "invalid");
+  assert.ok(piReadingSchema.safeParse(rejected).success);
+  const failed = readPiUsage({
+    text: fixtureText,
+    sidecarText: JSON.stringify({ status: "failed", error_class: "A".repeat(200) }),
+    nowMs: generatedAtMs,
+  });
+  assert.equal(failed.status, "failed");
+  assert.ok(piReadingSchema.safeParse(failed).success);
 });
 
 /* ---------------------------------------------------- quota stays where it belongs */

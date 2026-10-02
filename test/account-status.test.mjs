@@ -77,11 +77,13 @@ function claudeResult(hostId) {
 async function setup({
   callHostRpc = ({ hostId }) => claudeResult(hostId),
   readUsageLimits = ({ hostId } = {}) => usageLimits(hostId),
+  primaryHostId = "host-1",
+  listedHosts = hosts,
 } = {}) {
   const { bb, harness } = createFakePluginHost({
     pluginId: "provider-usage",
     sdk: {
-      hosts: { list: async () => hosts },
+      hosts: { list: async () => listedHosts },
       providers: {
         list: async () => [
           { id: "codex", displayName: "Codex", logoUrl: null },
@@ -89,6 +91,7 @@ async function setup({
         ],
       },
       system: {
+        config: async () => ({ primaryHostId }),
         usageLimits: async (input) => readUsageLimits(input),
       },
     },
@@ -97,6 +100,81 @@ async function setup({
   await plugin(bb);
   return harness;
 }
+
+test("implicit dashboard and CLI limits follow the primary machine", async () => {
+  const asked = [];
+  const harness = await setup({
+    primaryHostId: "host-2",
+    readUsageLimits: ({ hostId } = {}) => ({ ...usageLimits(hostId), codex: emptyProvider }),
+    callHostRpc: ({ hostId, method }) => {
+      if (method === "claudeUsage") asked.push(hostId);
+      return claudeResult(hostId);
+    },
+  });
+  try {
+    const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    const claude = dashboard.providers.find((row) => row.key === "claudeCode");
+    assert.equal(claude.accountEmail, "claude-two@example.test");
+    const result = await harness.behavior.runCli(["--json", "--force"]);
+    assert.equal(JSON.parse(result.stdout).providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+    assert.deepEqual(asked, ["host-2", "host-2"]);
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("implicit Claude reads refuse an unavailable primary source", async () => {
+  for (const primaryHostId of [null, "host-2"]) {
+    const harness = await setup({
+      primaryHostId,
+      readUsageLimits: ({ hostId } = {}) => ({ ...usageLimits(hostId), codex: emptyProvider }),
+      callHostRpc: () => { throw new Error("unavailable"); },
+    });
+    try {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+      const claude = dashboard.providers.find((row) => row.key === "claudeCode");
+      assert.equal(claude.status, "unknown");
+      assert.equal(claude.accountEmail, null);
+      assert.deepEqual(claude.windows, []);
+    } finally {
+      await harness.lifecycle.dispose();
+    }
+  }
+});
+
+test("implicit and hidden-host requests select a visible machine", async () => {
+  const harness = await setup();
+  try {
+    await harness.behavior.setSettings({ panelHidden: "PC 1" });
+    for (const hostId of [null, "host-1"]) {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
+      assert.equal(dashboard.hostId, "host-2");
+      assert.equal(dashboard.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+    }
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("hiding all paired machines yields no limits or totals", async () => {
+  const harness = await setup({
+    readUsageLimits: () => { throw new Error("hidden machine was asked"); },
+    callHostRpc: () => { throw new Error("hidden machine was asked"); },
+  });
+  try {
+    await harness.behavior.setSettings({ panelHidden: "PC 1\nPC 2" });
+    for (const hostId of [null, "host-1", "host-2"]) {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
+      assert.deepEqual(dashboard.hosts, []);
+      assert.deepEqual(dashboard.providers, []);
+      assert.equal(dashboard.totals.tightest, null);
+    }
+    const cli = await harness.behavior.runCli(["--json", "--force"]);
+    assert.deepEqual(JSON.parse(cli.stdout).providers, []);
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
 
 test("accounts CLI keeps four machine/provider identities and quota0 separate", async () => {
   const harness = await setup();

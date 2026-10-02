@@ -132,19 +132,18 @@ export async function pollPiUsage(
   deps: PiPollDeps,
   memory: PiPollMemory = piEmptyMemory(),
 ): Promise<PiPollResult> {
-  const nowMs = deps.nowMs();
   const grace = deps.graceSeconds;
 
   let hosts: readonly PiHostRow[];
   try {
     hosts = await deps.hosts();
   } catch {
-    return unavailable(PI_HOST_LIST_FAILED, memory, nowMs, grace);
+    return unavailable(PI_HOST_LIST_FAILED, memory, deps.nowMs(), grace);
   }
 
   const owner = piOwningHost(hosts);
   if (owner.state !== "ready") {
-    return unavailable(owner, memory, nowMs, grace);
+    return unavailable(owner, memory, deps.nowMs(), grace);
   }
 
   let answer: unknown;
@@ -152,12 +151,12 @@ export async function pollPiUsage(
     answer = await deps.read(owner.hostId);
   } catch {
     // Never the error's own text: it can name the machine or quote a stack.
-    return unavailable(PI_HOST_CALL_FAILED, memory, nowMs, grace);
+    return unavailable(PI_HOST_CALL_FAILED, memory, deps.nowMs(), grace);
   }
 
   const parsed = externalPiUsageSchema.safeParse(answer);
   if (!parsed.success) {
-    return unavailable(PI_HOST_READ_INCOMPATIBLE, memory, nowMs, grace);
+    return unavailable(PI_HOST_READ_INCOMPATIBLE, memory, deps.nowMs(), grace);
   }
   const read: ExternalPiUsageRead = parsed.data;
 
@@ -166,7 +165,7 @@ export async function pollPiUsage(
     sidecar: read.sidecar,
     retained: memory.retained,
     failedBefore: memory.failedBefore,
-    nowMs,
+    nowMs: deps.nowMs(),
     graceSeconds: grace,
   });
 

@@ -35,15 +35,10 @@ test("the approved machine is the one that is read", () => {
   assert.deepEqual(picked, { state: "ready", hostId: "h2" });
 });
 
-test("the approved machine may be named by its id as well as its label", () => {
-  assert.deepEqual(piOwningHost([connected("homeserver", "Pi box")]), {
-    state: "ready",
-    hostId: "homeserver",
-  });
-  assert.deepEqual(piOwningHost([connected("h9", " HomeServer ")]), {
-    state: "ready",
-    hostId: "h9",
-  });
+test("only the exact approved name selects an owner", () => {
+  for (const host of [connected("homeserver", "Pi box"), connected("h9", " HomeServer "), connected("h3", "HOMESERVER")]) {
+    assert.equal(piOwningHost([host]).reason, "owning_host_unknown");
+  }
 });
 
 test("no approved machine means unavailable, not another machine", () => {
@@ -61,7 +56,7 @@ test("an empty machine list is unavailable, not the server's own disk", () => {
 });
 
 test("two machines answering to the name are an ambiguity, never a sum", () => {
-  const picked = piOwningHost([connected("h1", "homeserver"), connected("h2", "HOMESERVER")]);
+  const picked = piOwningHost([connected("h1", "homeserver"), connected("h2", "homeserver")]);
   assert.equal(picked.state, "unavailable");
   assert.equal(picked.reason, "owning_host_ambiguous");
   assert.ok(!("hostId" in picked));

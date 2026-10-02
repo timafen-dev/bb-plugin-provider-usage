@@ -89,6 +89,24 @@ test("the export location is the producer's own documented convention", () => {
   assert.equal(PI_SNAPSHOT_FILE_NAME, "snapshot.json");
 });
 
+test("malformed UTF-8 is refused in both export representations", async () => {
+  for (const representation of ["snapshot", "sidecar"]) {
+    const { home, location } = await placeFixture();
+    const snapshot = JSON.parse(fixtureText);
+    snapshot.warnings.push("bad X byte");
+    const text = representation === "snapshot" ? JSON.stringify(snapshot) : '{"status":"failed","error_class":"X"}';
+    const bytes = Buffer.from(text);
+    bytes[bytes.indexOf("X")] = 0xff;
+    await writeFile(location[representation], bytes);
+    const read = await readPiExportFiles({ home });
+    assert.deepEqual(read[representation], { state: "refused", refusal: "unreadable" });
+    const facts = await readPiExportFacts({ home });
+    const reading = readPiUsageFacts({ ...facts, nowMs: generatedAtMs });
+    assert.equal(reading.status, representation === "snapshot" ? "invalid" : "failed");
+    assert.ok(!JSON.stringify(facts).includes("�"));
+  }
+});
+
 test("a placed snapshot reads as a valid artifact of exactly its own bytes", async () => {
   const { home } = await placeFixture();
   const facts = await readPiExportFacts({ home });

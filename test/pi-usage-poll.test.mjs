@@ -117,7 +117,7 @@ test("a machine list without the approved machine is unavailable, not a zero", a
 test("two machines answering to the approved name are an ambiguity, not a sum", async () => {
   const twins = [
     { ...OWNER },
-    { id: "host-owning-2", name: PI_OWNING_HOST_NAME.toUpperCase(), status: "connected" },
+    { id: "host-owning-2", name: PI_OWNING_HOST_NAME, status: "connected" },
   ];
   const { asked, deps } = harness({ hosts: twins });
   const { reading } = await pollPiUsage(deps);
@@ -320,6 +320,19 @@ test("an unreachable poll between a failure and a retry reports no recovery", as
 
   const recovered = await pollPiUsage(harness().deps, gap.memory);
   assert.equal(recovered.reading.recoveredFromFailure, true);
+});
+
+test("freshness uses the clock after the host observation completes", async () => {
+  for (const [start, finish, expected] of [
+    [generatedAtMs - 10_000, generatedAtMs, "ok"],
+    [generatedAtMs + 80_000, generatedAtMs + 100_000, "stale"],
+  ]) {
+    let clock = start;
+    const { deps } = harness({ nowMs: () => clock, reply: () => { clock = finish; return answer(); } });
+    const result = await pollPiUsage(deps);
+    assert.equal(result.reading.status, expected);
+    assert.equal(result.reading.data.freshness.ageSeconds, (finish - generatedAtMs) / 1000);
+  }
 });
 
 test("freshness is judged by this machine's clock against generated_at", async () => {

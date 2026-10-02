@@ -27,7 +27,8 @@ const { mergeMachineTokens, slicesFromScan } = await import(
 const { createHostTokenHistory } = await import("../lib/host-token-history.ts");
 const { dayKey } = await import("../lib/tokens.ts");
 
-const today = dayKey(Date.now());
+const testNow = Date.now();
+const today = dayKey(testNow);
 const bucket = (tokens) => ({
   tokens,
   input: tokens,
@@ -40,7 +41,7 @@ const machine = (id, computer, slices, error = null) => ({
   id,
   name: id,
   error,
-  tokens: { computer, scannedAt: new Date().toISOString(), changedFiles: 0, slices },
+  tokens: { computer, scannedAt: new Date(testNow).toISOString(), changedFiles: 0, slices },
 });
 const slice = (provider, location, tokens) => ({
   provider,
@@ -95,6 +96,35 @@ test("a machine that did not answer keeps its last numbers, marked stale", () =>
       ["two", "error", 0],
     ],
   );
+});
+
+test("newest observations win regardless of registration order", () => {
+  const old = machine("offline", "pc", [slice("codex", "/a", 100)], "offline");
+  const fresh = machine("connected", "pc", [slice("codex", "/a", 120)]);
+  old.tokens.scannedAt = new Date(Date.now() - 300_000).toISOString();
+  for (const sources of [[old, fresh], [fresh, old]]) {
+    const merged = mergeMachineTokens(sources, 7);
+    assert.equal(merged.daily[today].codex.tokens, 120);
+    assert.equal(merged.fileCount, 1);
+    assert.equal(merged.machines.find((row) => row.id === "connected").tokens, 120);
+  }
+  old.error = null;
+  const retained = mergeMachineTokens([old], 7);
+  assert.equal(retained.machines[0].status, "stale");
+  assert.equal(retained.machines[0].tokens, 100);
+});
+
+test("overlapping opencode database sets count each database once", () => {
+  const scan = (paths) => ({
+    files: paths.map(([path, tokens]) => ({ path, daily: { [today]: bucket(tokens) } })),
+    daily: { [today]: { opencode: bucket(paths.reduce((sum, [, tokens]) => sum + tokens, 0)) } },
+  });
+  const shared = ["/home/u/.local/share/opencode/opencode.db", 7];
+  const both = slicesFromScan(scan([["/xdg/opencode/opencode.db", 5], shared]), "/home/u", { XDG_DATA_HOME: "/xdg" });
+  const one = slicesFromScan(scan([shared]), "/home/u", {});
+  const merged = mergeMachineTokens([machine("both", "pc", both), machine("one", "pc", one)], 7);
+  assert.equal(merged.daily[today].opencode.tokens, 12);
+  assert.equal(merged.fileCount, 2);
 });
 
 test("window totals ignore days outside the window", () => {

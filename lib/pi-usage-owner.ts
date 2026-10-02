@@ -49,19 +49,12 @@ function unavailable(reason: string, detail: string): PiOwningHost {
   return { state: "unavailable", reason, detail };
 }
 
-/** Matches by machine name first, then by id, both exactly and case-blind. */
-function matches(host: PiHostRow): boolean {
-  const name = host.name.trim().toLowerCase();
-  const id = host.id.trim().toLowerCase();
-  return name === PI_OWNING_HOST_NAME || id === PI_OWNING_HOST_NAME;
-}
-
 /**
  * Picks the approved owning machine out of a machine list, or says why there
  * is none to ask.
  */
 export function piOwningHost(hosts: readonly PiHostRow[]): PiOwningHost {
-  const found = hosts.filter(matches);
+  const found = hosts.filter((host) => host.name === PI_OWNING_HOST_NAME);
   if (found.length === 0) {
     return unavailable(
       "owning_host_unknown",

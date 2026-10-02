@@ -42,8 +42,9 @@ import {
   PI_FOLDED_MODEL,
   PI_FOLDED_ROW,
   PI_GRACE_SECONDS,
-  PI_FUTURE_SKEW_SECONDS,
   isPiSafeLink,
+  piFreshness,
+  type PiFreshness,
   piHourInstantMs,
   piHourRfc3339,
   type PiIdleReadingShape,
@@ -73,8 +74,8 @@ export {
   PI_MAIN_UNASSIGNED,
   PI_TICK_SECONDS,
   isPiSafeLink,
-  piCostAgrees,
   piExactCost,
+  piFreshness,
   piHourInstantMs,
   piHourOffset,
   piHourRfc3339,
@@ -421,7 +422,8 @@ export function piPrivacyHits(value: unknown): PiPrivacyHit[] {
     }
     if (node !== null && typeof node === "object") {
       for (const [key, item] of Object.entries(node)) {
-        const next = path === "" ? key : `${path}.${key}`;
+        const field = /^quarantine\[\d+\]$/.test(path) ? "(field)" : key;
+        const next = path === "" ? field : `${path}.${field}`;
         checkString(key, next);
         walk(item, next);
       }
@@ -716,13 +718,17 @@ export function parsePiUsageSnapshot(text: string): PiSnapshotParse {
       new Set(
         parsed.error.issues
           .slice(0, 8)
-          .map((issue) => issue.path.map(String).join(".") || "(root)"),
+          .map((issue) => issue.path.map((part, index) =>
+            issue.path[0] === "quarantine" && index > 1 && typeof part === "string"
+              ? "(field)"
+              : String(part),
+          ).join(".") || "(root)"),
       ),
     );
     return {
       ok: false,
       reason: "schema",
-      detail: `the snapshot does not match the agreed shape at: ${paths.join(", ")}`,
+      detail: `the snapshot does not match the agreed shape at: ${paths.join(", ")}`.slice(0, 500),
     };
   }
 
@@ -732,7 +738,7 @@ export function parsePiUsageSnapshot(text: string): PiSnapshotParse {
     return {
       ok: false,
       reason: "privacy",
-      detail: `the snapshot carries content the producer never emits at: ${where.join(", ")}`,
+      detail: `the snapshot carries content the producer never emits at: ${where.join(", ")}`.slice(0, 500),
     };
   }
 
@@ -744,7 +750,7 @@ export function parsePiUsageSnapshot(text: string): PiSnapshotParse {
     return {
       ok: false,
       reason: "structure",
-      detail: `the snapshot does not add up at: ${where.join(", ")}`,
+      detail: `the snapshot does not add up at: ${where.join(", ")}`.slice(0, 500),
     };
   }
 
@@ -803,32 +809,7 @@ export function parsePiStatusSidecar(text: string | null): PiSidecarRead {
 
 /* ------------------------------------------------------------------ reading */
 
-export type PiFreshness =
-  | { state: "fresh"; ageSeconds: number }
-  | { state: "stale"; ageSeconds: number }
-  | { state: "future"; aheadSeconds: number };
-
-/**
- * Age comes from the snapshot's own `generated_at`, never from a file's
- * modification time: a producer that rewrites an old export, or a copy that
- * refreshes an mtime, must not look like a new observation.
- */
-export function piFreshness(
-  generatedAt: string,
-  nowMs: number,
-  graceSeconds = PI_GRACE_SECONDS,
-): PiFreshness {
-  const ms = instantMs(generatedAt);
-  if (ms === null) return { state: "stale", ageSeconds: Infinity };
-  const ageSeconds = (nowMs - ms) / 1000;
-  if (ageSeconds < -PI_FUTURE_SKEW_SECONDS) {
-    return { state: "future", aheadSeconds: -ageSeconds };
-  }
-  const age = Math.max(0, ageSeconds);
-  return age > graceSeconds
-    ? { state: "stale", ageSeconds: age }
-    : { state: "fresh", ageSeconds: age };
-}
+export type { PiFreshness } from "./pi-usage-shape";
 
 export type PiReadingStatus =
   /** A valid snapshot, generated within the grace window. */
@@ -983,10 +964,10 @@ export function readPiUsageFacts(input: PiReadFacts): PiReading {
   if (artifact === undefined) {
     return {
       status: "unavailable",
-      reason: input.unavailable?.reason ?? "owning_host_unavailable",
+      reason: (input.unavailable?.reason ?? "owning_host_unavailable").slice(0, 200),
       detail:
-        input.unavailable?.detail ??
-        "the approved owning machine for Firstmate Pi is not available",
+        (input.unavailable?.detail ??
+        "the approved owning machine for Firstmate Pi is not available").slice(0, 500),
       data: retainedData(input.retained, input.nowMs, grace),
       // A poll that never reached the export location observed nothing, so it
       // cannot report that the producer's retry succeeded either.
@@ -1008,9 +989,9 @@ export function readPiUsageFacts(input: PiReadFacts): PiReading {
     return {
       status: "failed",
       reason:
-        sidecar.state === "failed"
+        (sidecar.state === "failed"
           ? `producer_failed:${sidecar.errorClass ?? "unknown"}`
-          : `producer_failed_note_unreadable:${sidecar.reason}`,
+          : `producer_failed_note_unreadable:${sidecar.reason}`).slice(0, 200),
       detail:
         sidecar.state === "failed"
           ? "the producer reported that its last export failed; these figures are not current"
@@ -1033,8 +1014,8 @@ export function readPiUsageFacts(input: PiReadFacts): PiReading {
   if (artifact.state === "refused") {
     return {
       status: "invalid",
-      reason: `snapshot_rejected:${artifact.reason}`,
-      detail: artifact.detail,
+      reason: `snapshot_rejected:${artifact.reason}`.slice(0, 200),
+      detail: artifact.detail.slice(0, 500),
       data: retainedData(input.retained, input.nowMs, grace),
       recoveredFromFailure,
     };
@@ -1051,7 +1032,7 @@ export function readPiUsageFacts(input: PiReadFacts): PiReading {
     reason:
       status === "ok"
         ? noteUnknown
-          ? `fresh_failure_note_unchecked:${sidecar.reason}`
+          ? `fresh_failure_note_unchecked:${sidecar.reason}`.slice(0, 200)
           : "fresh"
         : status === "stale"
           ? "snapshot_older_than_grace"

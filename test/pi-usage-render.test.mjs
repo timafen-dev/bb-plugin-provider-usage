@@ -8,11 +8,6 @@
 // model, the recorded USD beside an unknown one, the coverage status, and MAIN
 // staying unassigned — plus the absence of anything private.
 //
-// The project's test runner strips types but cannot compile JSX, so the tree is
-// loaded through jiti, which the bb toolchain already brings in. If it is not
-// resolvable the whole file skips rather than failing: the presentation
-// behaviour is covered either way by `pi-usage-view.test.mjs`, and a toolchain
-// that moved should not look like a broken panel.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
@@ -24,13 +19,6 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..");
 const require = createRequire(import.meta.url);
 
-let hasJiti = true;
-try {
-  require.resolve("jiti");
-} catch {
-  hasJiti = false;
-}
-
 const fixtureText = await readFile(
   join(here, "fixtures", "pi-usage-snapshot.json"),
   "utf8",
@@ -38,7 +26,7 @@ const fixtureText = await readFile(
 const fixture = JSON.parse(fixtureText);
 const GENERATED_MS = Date.parse(fixture.generated_at);
 
-const loaded = hasJiti ? await load() : null;
+const loaded = await load();
 
 async function load() {
   const { createJiti } = await import("jiti");
@@ -52,6 +40,8 @@ async function load() {
   });
   return {
     React: await jiti.import(require.resolve("react"), {}),
+    renderer: await jiti.import(require.resolve("react-test-renderer"), {}),
+    stub: await import("./support/plugin-sdk-app-stub.mjs"),
     server: await jiti.import(require.resolve("react-dom/server.node"), {}),
     section: await jiti.import(join(repo, "components", "pi-usage.tsx"), {}),
     contract: await jiti.import(join(repo, "lib", "pi-usage-contract.ts"), {}),
@@ -59,7 +49,74 @@ async function load() {
   };
 }
 
-const skip = loaded === null ? "jiti is not resolvable in this install" : false;
+test("mounted reads retain figures without current or idle badges after RPC failure", async () => {
+  const saved = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT, now: Date.now };
+  let clock = GENERATED_MS;
+  let tick;
+  let visible;
+  let fail = false;
+  let tree;
+  const idle = structuredClone(fixture);
+  const zeroTokens = { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 };
+  const zeroMoney = { calls: 0, priced_calls: 0, missing_cost_calls: 0, invalid_cost_calls: 0, token_field_gaps: 0, known_cost_usd: "0.000000", known_cost_usd_exact: "0" };
+  for (const key of Object.keys(idle.coverage)) {
+    if (typeof idle.coverage[key] === "number") idle.coverage[key] = 0;
+  }
+  idle.coverage.status = "verified_idle_zero";
+  idle.coverage.declared_sources = idle.coverage.sources.length;
+  idle.coverage.verified_idle_zero = idle.coverage.sources.length;
+  idle.coverage.sources.forEach((source) => { source.status = "verified_idle_zero"; source.entries_in_window = 0; });
+  Object.assign(idle.cost, zeroMoney);
+  idle.tokens = zeroTokens;
+  for (const amount of [...idle.tasks, ...idle.roles, ...idle.requested_models, ...idle.work_items, idle.main_unassigned, ...idle.days, ...idle.hours, ...idle.live_bins.bins]) {
+    Object.assign(amount, zeroMoney, { tokens: zeroTokens });
+  }
+  const reading = loaded.contract.readPiUsage({ text: JSON.stringify(idle), nowMs: clock });
+  assert.equal(loaded.view.piUsageView(reading, clock).verifiedIdleZero, true);
+  try {
+    Date.now = () => clock;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    globalThis.window = { setInterval: (fn) => { tick = fn; return 1; }, clearInterval: () => {} };
+    globalThis.document = {
+      visibilityState: "visible",
+      addEventListener: (_, fn) => { visible = fn; },
+      removeEventListener: () => {},
+    };
+    loaded.stub.setRpcCall(async () => {
+      if (fail) throw new Error("private transport failure");
+      return reading;
+    });
+    await loaded.renderer.act(async () => {
+      tree = loaded.renderer.create(loaded.React.createElement(loaded.section.PiUsageSection));
+    });
+    const rendered = () => JSON.stringify(tree.toJSON());
+    assert.match(rendered(), /demo-task/);
+    assert.match(rendered(), /Recorded 0s ago/);
+    assert.match(rendered(), /verified idle/);
+    fail = true;
+    clock += 30_000;
+    await loaded.renderer.act(async () => { tick(); });
+    assert.match(rendered(), /last known/);
+    assert.match(rendered(), /30s/);
+    assert.match(rendered(), /demo-task/);
+    assert.doesNotMatch(rendered(), /"Current"|"verified idle"|private transport failure/);
+    clock += 120_000;
+    await loaded.renderer.act(async () => { visible(); });
+    assert.match(rendered(), /2m/);
+    fail = false;
+    clock = GENERATED_MS;
+    await loaded.renderer.act(async () => { tick(); });
+    assert.doesNotMatch(rendered(), /last known|last ask/);
+    assert.match(rendered(), /Recorded 0s ago/);
+  } finally {
+    if (tree) await loaded.renderer.act(async () => { tree.unmount(); });
+    loaded.stub.setRpcCall(null);
+    Date.now = saved.now;
+    globalThis.window = saved.window;
+    globalThis.document = saved.document;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = saved.act;
+  }
+});
 
 /** The figures as markup, for a reading of some snapshot text. */
 function renderFigures(input = {}) {
@@ -78,7 +135,7 @@ function renderFigures(input = {}) {
   };
 }
 
-test("the section renders the producer's own rows and figures", { skip }, () => {
+test("the section renders the producer's own rows and figures", () => {
   const { html } = renderFigures();
 
   // Tasks, with the title and the approved link the producer emitted.
@@ -104,7 +161,7 @@ test("the section renders the producer's own rows and figures", { skip }, () => 
   assert.match(html, /part of the window not read|Token field gaps/);
 });
 
-test("the section labels its USD as an estimate, not an invoice", { skip }, () => {
+test("the section labels its USD as an estimate, not an invoice", () => {
   const { html } = renderFigures();
   assert.match(html, /API-equivalent/);
   assert.match(html, /not an invoice, a payment, or subscription quota/);
@@ -116,7 +173,7 @@ test("the section labels its USD as an estimate, not an invoice", { skip }, () =
   assert.doesNotMatch(html, /% left|Resets|resets in|remaining quota/i);
 });
 
-test("an unpriced row renders as unknown rather than as zero spend", { skip }, () => {
+test("an unpriced row renders as unknown rather than as zero spend", () => {
   const { html } = renderFigures();
   // The dataset's one priced call shows an amount; the unpriced model row
   // shows an em dash with its own counter wording beside it.
@@ -125,7 +182,7 @@ test("an unpriced row renders as unknown rather than as zero spend", { skip }, (
   assert.doesNotMatch(html, /\$0\.00/);
 });
 
-test("the token fields stay separate and reasoning is marked a subset", { skip }, () => {
+test("the token fields stay separate and reasoning is marked a subset", () => {
   const { html } = renderFigures();
   assert.match(html, /Input/);
   assert.match(html, /Cache read/);
@@ -140,7 +197,7 @@ test("the token fields stay separate and reasoning is marked a subset", { skip }
   assert.match(html, /3\.5k/);
 });
 
-test("a stale reading renders the same figures, aged, never as current", { skip }, () => {
+test("a stale reading renders the same figures, aged, never as current", () => {
   const fresh = renderFigures();
   const stale = renderFigures({ nowMs: GENERATED_MS + 10 * 60_000 });
   assert.equal(stale.view.status.status, "stale");
@@ -151,13 +208,13 @@ test("a stale reading renders the same figures, aged, never as current", { skip 
   assert.match(stale.html, /demo-task/);
 });
 
-test("a reading with no figures renders no figure markup at all", { skip }, () => {
+test("a reading with no figures renders no figure markup at all", () => {
   const missing = renderFigures({ text: null });
   assert.equal(missing.view.figures, null);
   assert.equal(missing.html, "");
 });
 
-test("the rendered markup carries no path, address or credential", { skip }, () => {
+test("the rendered markup carries no path, address or credential", () => {
   for (const input of [{}, { text: "{]" }, { nowMs: GENERATED_MS - 60_000 }]) {
     const { html } = renderFigures(input);
     assert.doesNotMatch(html, /\/home\/|\/Users\/|\/root\/|~\//);
@@ -167,7 +224,7 @@ test("the rendered markup carries no path, address or credential", { skip }, () 
   }
 });
 
-test("the whole section renders before any answer has arrived", { skip }, () => {
+test("the whole section renders before any answer has arrived", () => {
   // A static render runs no effect, so this is the page's first paint: a state
   // line and a skeleton, and specifically not a zero.
   const html = loaded.server.renderToStaticMarkup(
@@ -179,7 +236,7 @@ test("the whole section renders before any answer has arrived", { skip }, () => 
   assert.doesNotMatch(html, /\$0\.00/);
 });
 
-test("the chart draws one bar per recorded point, placed by time", { skip }, () => {
+test("the chart draws one bar per recorded point, placed by time", () => {
   const { view } = renderFigures();
   const live = view.figures.series.live;
   const width = 600;
@@ -228,7 +285,7 @@ test("the chart draws one bar per recorded point, placed by time", { skip }, () 
   assert.match(html, /10s bins/);
 });
 
-test("an hour chart keeps the offsets it was recorded with", { skip }, () => {
+test("an hour chart keeps the offsets it was recorded with", () => {
   const { view } = renderFigures();
   const html = loaded.server.renderToStaticMarkup(
     loaded.React.createElement(loaded.section.PiUsageSeriesChart, {
@@ -239,7 +296,7 @@ test("an hour chart keeps the offsets it was recorded with", { skip }, () => {
   assert.match(html, /Oct 1 22:00 \+00:00/);
 });
 
-test("a series with no recorded point says so instead of drawing a zero", { skip }, () => {
+test("a series with no recorded point says so instead of drawing a zero", () => {
   const { view } = renderFigures();
   const empty = { ...view.figures.series.days, points: [], domain: null };
   const html = loaded.server.renderToStaticMarkup(

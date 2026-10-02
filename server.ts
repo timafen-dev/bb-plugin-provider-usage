@@ -382,7 +382,7 @@ function createLimitStore(bb: BbPluginApi) {
     const key = hostKey(hostId);
     const existing = states.get(key);
     if (existing) return existing;
-    const restored = readJson<HostLimitState>(`host-v2:${key}`) ?? {
+    const restored = readJson<HostLimitState>(`${hostId === null ? "host-v3" : "host-v2"}:${key}`) ?? {
       lastGood: {},
       lastFetch: null,
     };
@@ -392,7 +392,7 @@ function createLimitStore(bb: BbPluginApi) {
   };
 
   const persist = (hostId: string | null, state: HostLimitState) => {
-    write.run(`host-v2:${hostKey(hostId)}`, JSON.stringify(state));
+    write.run(`${hostId === null ? "host-v3" : "host-v2"}:${hostKey(hostId)}`, JSON.stringify(state));
   };
 
   const claudeHost = bb.hosts.experimental_client({ contract: hostContract });
@@ -411,10 +411,9 @@ function createLimitStore(bb: BbPluginApi) {
    */
   const claudeForHost = async (
     hostId: string | null,
-    fallback: ProviderLimitSlice,
   ): Promise<ProviderLimitSlice> => {
-    if (hostId === null) return fallback;
     try {
+      if (hostId === null) throw new Error("Primary machine is unavailable.");
       const own = await claudeHost.call("claudeUsage", null, { hostId });
       return {
         status: own.status,
@@ -443,7 +442,7 @@ function createLimitStore(bb: BbPluginApi) {
     const state = stateFor(hostId);
     const raw = await bb.sdk.system.usageLimits(hostId ? { hostId } : {});
     const fresh = normalizeProviderLimits(raw);
-    fresh.claudeCode = await claudeForHost(hostId, fresh.claudeCode);
+    fresh.claudeCode = await claudeForHost(hostId);
     const limits = overlayLastGoodLimits(fresh, state.lastGood);
     state.lastGood = rememberGoodLimits(limits, state.lastGood);
     state.lastFetch = {
@@ -463,6 +462,9 @@ function createLimitStore(bb: BbPluginApi) {
   };
 
   const get = async (hostId: string | null, force = false) => {
+    if (hostId === null) {
+      hostId = (await bb.sdk.system.config().catch(() => null))?.primaryHostId ?? null;
+    }
     const key = hostKey(hostId);
     stateFor(hostId);
     const cached = fetchedByHost.get(key);
@@ -508,8 +510,20 @@ async function loadDashboard(
   // Hidden machines go before anything else: the panel walks this list to
   // decide which sections to draw, so a machine left in it is a section.
   const hosts = everyHost.filter((host) => !isMachineHidden(hidden, host));
+  if (everyHost.length > 0 && hosts.length === 0) {
+    return assembleDashboard({
+      limits: Object.fromEntries(PROVIDER_KEYS.map((key) =>
+        [key, { status: "not_installed", windows: [] }],
+      )) as Record<ProviderKey, ProviderLimitSlice>,
+      hosts,
+      catalog: [],
+      hostId: null,
+    });
+  }
   const resolvedHostId =
-    hostId && hosts.some((host) => host.id === hostId) ? hostId : null;
+    hostId && hosts.some((host) => host.id === hostId)
+      ? hostId
+      : hosts.length < everyHost.length ? hosts[0]!.id : null;
   const [slices, catalog] = await Promise.all([
     limitsStore.get(resolvedHostId, force),
     bb.sdk.providers.list(resolvedHostId ? { hostId: resolvedHostId } : {}),
@@ -918,8 +932,6 @@ function createTokenStore(bb: BbPluginApi) {
       daily: Record<string, Record<string, TokenBucket>>;
     },
   ): TokenSnapshot => {
-    // Machines first: a location both a machine and the server can see is
-    // credited to the machine.
     const merged = mergeMachineTokens(
       [
         ...remote,
