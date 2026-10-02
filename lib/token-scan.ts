@@ -24,6 +24,8 @@ export type DailyProviderBuckets = Record<string, Record<string, TokenBucket>>;
 
 export interface FileScanResult {
   path: string;
+  observedAt?: string;
+  retained?: boolean;
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
@@ -33,6 +35,7 @@ export interface FileScanResult {
 }
 
 export type FileCacheEntry = {
+  observedAt?: string;
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
@@ -368,21 +371,27 @@ async function parseFile(
 export function seedDailyFromCache(
   daily: DailyProviderBuckets,
   sources: string[],
-  cached: Iterable<[string, { daily: Record<string, TokenBucket> }]>,
+  cached: Iterable<[string, { daily: Record<string, TokenBucket>; observedAt?: string }]>,
   kind: "cursor" | "opencode",
+  files: FileScanResult[],
 ): number {
-  if (sources.includes(kind)) return 0;
-  const files = [];
+  const present = new Set(files.map((file) => file.path));
+  const retained: FileScanResult[] = [];
   for (const [path, row] of cached) {
-    if (kind === "cursor" ? isCursorStorePath(path) : isOpencodeStorePath(path)) {
-      files.push({ path, mtimeMs: 0, size: 0, daily: row.daily });
+    if (!present.has(path) && (kind === "cursor" ? isCursorStorePath(path) : isOpencodeStorePath(path))) {
+      retained.push({
+        path, mtimeMs: 0, size: 0, daily: row.daily,
+        observedAt: row.observedAt ?? "1970-01-01T00:00:00.000Z",
+        retained: true,
+      });
     }
   }
-  if (files.length === 0) return 0;
-  if (kind === "cursor") mergeCursorDaily(daily, files);
-  else mergeOpencodeDaily(daily, files);
-  sources.push(kind);
-  return files.length;
+  if (retained.length === 0) return 0;
+  if (kind === "cursor") mergeCursorDaily(daily, retained);
+  else mergeOpencodeDaily(daily, retained);
+  files.push(...retained);
+  if (!sources.includes(kind)) sources.push(kind);
+  return retained.length;
 }
 
 export async function scanTokenFiles(options?: {

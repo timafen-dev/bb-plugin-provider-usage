@@ -24,6 +24,7 @@ registerHooks({
 const { mergeMachineTokens, slicesFromScan } = await import(
   "../lib/machine-tokens.ts"
 );
+const { seedDailyFromCache } = await import("../lib/token-scan.ts");
 const { createHostTokenHistory } = await import("../lib/host-token-history.ts");
 const { dayKey } = await import("../lib/tokens.ts");
 
@@ -125,6 +126,38 @@ test("overlapping opencode database sets count each database once", () => {
   const merged = mergeMachineTokens([machine("both", "pc", both), machine("one", "pc", one)], 7);
   assert.equal(merged.daily[today].opencode.tokens, 12);
   assert.equal(merged.fileCount, 2);
+});
+
+test("retained database slices preserve their observations across cached paints", () => {
+  const path = "/home/u/.local/share/opencode/opencode.db";
+  const old = new Date(testNow - 300_000).toISOString();
+  const cache = new Map([[path, { daily: { [today]: bucket(100) }, observedAt: old }]]);
+  const scan = { files: [], sources: [], daily: {} };
+  seedDailyFromCache(scan.daily, scan.sources, cache, "opencode", scan.files);
+  const local = machine("server", "pc", slicesFromScan(scan));
+  const remote = machine("host", "pc", [slice("opencode", path, 120)]);
+  const merged = mergeMachineTokens([local, remote], 7, testNow);
+  assert.equal(merged.daily[today].opencode.tokens, 120);
+  assert.equal(merged.machines.find((row) => row.id === "server").status, "stale");
+  assert.equal(mergeMachineTokens([local], 90, testNow).daily[today].opencode.tokens, 100);
+  assert.equal(local.tokens.slices[0].observedAt, old);
+});
+
+test("cached paint retains missing databases alongside successfully scanned databases", () => {
+  const first = "/xdg/opencode/opencode.db";
+  const second = "/home/u/.local/share/opencode/opencode.db";
+  const scan = {
+    files: [{ path: first, daily: { [today]: bucket(5) }, observedAt: new Date(testNow).toISOString() }],
+    sources: ["opencode"],
+    daily: { [today]: { opencode: bucket(5) } },
+  };
+  const cache = new Map([[first, { daily: { [today]: bucket(4) } }], [second, { daily: { [today]: bucket(7) } }]]);
+  assert.equal(seedDailyFromCache(scan.daily, scan.sources, cache, "opencode", scan.files), 1);
+  assert.equal(seedDailyFromCache(scan.daily, scan.sources, cache, "opencode", scan.files), 0);
+  const merged = mergeMachineTokens([machine("server", "pc", slicesFromScan(scan))], 7, testNow);
+  assert.equal(merged.daily[today].opencode.tokens, 12);
+  assert.equal(merged.fileCount, 2);
+  assert.equal(merged.machines[0].status, "stale");
 });
 
 test("window totals ignore days outside the window", () => {

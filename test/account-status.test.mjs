@@ -142,17 +142,82 @@ test("implicit Claude reads refuse an unavailable primary source", async () => {
   }
 });
 
-test("implicit and hidden-host requests select a visible machine", async () => {
+test("a hidden primary is not replaced by the first visible peer", async () => {
   const harness = await setup();
   try {
     await harness.behavior.setSettings({ panelHidden: "PC 1" });
     for (const hostId of [null, "host-1"]) {
       const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
-      assert.equal(dashboard.hostId, "host-2");
-      assert.equal(dashboard.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+      assert.deepEqual(dashboard.providers, []);
+      assert.deepEqual(dashboard.hosts.map((host) => host.id), ["host-2"]);
+      assert.equal(dashboard.totals.tightest, null);
+    }
+    const visible = await harness.behavior.callRpc("getDashboard", { hostId: "host-2", force: true });
+    assert.equal(visible.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("hiding an unrelated machine preserves implicit primary ownership", async () => {
+  const harness = await setup({
+    primaryHostId: "host-2",
+    listedHosts: [...hosts, { id: "host-3", name: "PC 3", status: "connected" }],
+    readUsageLimits: ({ hostId } = {}) => ({ ...usageLimits(hostId), codex: emptyProvider }),
+  });
+  try {
+    await harness.behavior.setSettings({ panelHidden: "PC 3" });
+    const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.equal(dashboard.hostId, "host-2");
+    assert.equal(dashboard.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("provider omissions apply to implicit and explicit rows and totals", async () => {
+  const harness = await setup({
+    primaryHostId: "host-2",
+    readUsageLimits: () => ({
+      codex: emptyProvider,
+      "claude-code": emptyProvider,
+      "acp-cursor": emptyProvider,
+      muse: { status: "ok", windows: [window(40)] },
+    }),
+  });
+  try {
+    for (const rule of ["PC 2: claude-code", "host-2: claudeCode", "*: claude-code"]) {
+      await harness.behavior.setSettings({ panelHidden: rule });
+      for (const hostId of [null, "host-2"]) {
+        const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
+        assert.ok(dashboard.providers.every((row) => row.key !== "claudeCode"));
+        assert.equal(dashboard.totals.cumulativeRemainingPercent, 60);
+        assert.equal(dashboard.totals.tightest.providerId, "muse");
+        assert.equal(dashboard.totals.windowCount, 1);
+      }
     }
   } finally {
     await harness.lifecycle.dispose();
+  }
+});
+
+test("offline and failed account fallbacks honour provider omissions", async () => {
+  for (const mode of ["offline", "failed"]) {
+    const harness = await setup({
+      listedHosts: hosts.map((host) => host.id === "host-2" && mode === "offline" ? { ...host, status: "disconnected" } : host),
+      readUsageLimits: () => { throw new Error("source unavailable"); },
+    });
+    try {
+      await harness.behavior.setSettings({ panelHidden: "PC 2: claude-code" });
+      const result = await harness.behavior.runCli(["accounts", "--machine", "host-2", "--json", "--force"]);
+      const accounts = JSON.parse(result.stdout).accounts;
+      assert.deepEqual(accounts.map((row) => [row.providerId, row.status]), [["codex", "unknown"]]);
+      await harness.behavior.setSettings({ panelHidden: "PC 2: claudeCode\n*: codex" });
+      const empty = await harness.behavior.runCli(["accounts", "--machine", "host-2", "--json", "--force"]);
+      assert.deepEqual(JSON.parse(empty.stdout).accounts, []);
+    } finally {
+      await harness.lifecycle.dispose();
+    }
   }
 });
 

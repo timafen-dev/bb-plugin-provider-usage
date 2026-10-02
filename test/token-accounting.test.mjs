@@ -337,6 +337,7 @@ test("seedDailyFromCache paints cursor/opencode without double-counting", () => 
   const today = dayKey(Date.now());
   const daily = {};
   const sources = [];
+  const files = [];
   const cached = new Map([
     [
       "/tmp/.cursor/acp-sessions/ses/store.db",
@@ -370,13 +371,15 @@ test("seedDailyFromCache paints cursor/opencode without double-counting", () => 
     ],
   ]);
 
-  assert.equal(seedDailyFromCache(daily, sources, cached, "cursor"), 1);
-  assert.equal(seedDailyFromCache(daily, sources, cached, "opencode"), 1);
+  assert.equal(seedDailyFromCache(daily, sources, cached, "cursor", files), 1);
+  assert.equal(seedDailyFromCache(daily, sources, cached, "opencode", files), 1);
   assert.deepEqual(sources, ["cursor", "opencode"]);
   assert.equal(daily[today]?.cursor.tokens, 311);
   assert.equal(daily[today]?.opencode.tokens, 4_800);
+  assert.equal(files.length, 2);
+  assert.ok(files.every((file) => file.retained && file.observedAt === "1970-01-01T00:00:00.000Z"));
 
-  assert.equal(seedDailyFromCache(daily, sources, cached, "cursor"), 0);
+  assert.equal(seedDailyFromCache(daily, sources, cached, "cursor", files), 0);
   assert.equal(daily[today]?.cursor.tokens, 311);
 });
 

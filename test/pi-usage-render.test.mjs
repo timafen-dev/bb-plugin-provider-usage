@@ -49,13 +49,7 @@ async function load() {
   };
 }
 
-test("mounted reads retain figures without current or idle badges after RPC failure", async () => {
-  const saved = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT, now: Date.now };
-  let clock = GENERATED_MS;
-  let tick;
-  let visible;
-  let fail = false;
-  let tree;
+function idleSnapshot() {
   const idle = structuredClone(fixture);
   const zeroTokens = { input: 0, output: 0, cache_read: 0, cache_write: 0, reasoning: 0 };
   const zeroMoney = { calls: 0, priced_calls: 0, missing_cost_calls: 0, invalid_cost_calls: 0, token_field_gaps: 0, known_cost_usd: "0.000000", known_cost_usd_exact: "0" };
@@ -71,7 +65,17 @@ test("mounted reads retain figures without current or idle badges after RPC fail
   for (const amount of [...idle.tasks, ...idle.roles, ...idle.requested_models, ...idle.work_items, idle.main_unassigned, ...idle.days, ...idle.hours, ...idle.live_bins.bins]) {
     Object.assign(amount, zeroMoney, { tokens: zeroTokens });
   }
-  const reading = loaded.contract.readPiUsage({ text: JSON.stringify(idle), nowMs: clock });
+  return idle;
+}
+
+test("mounted reads retain figures without current or idle badges after RPC failure", async () => {
+  const saved = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT, now: Date.now };
+  let clock = GENERATED_MS;
+  let tick;
+  let visible;
+  let fail = false;
+  let tree;
+  const reading = loaded.contract.readPiUsage({ text: JSON.stringify(idleSnapshot()), nowMs: clock });
   assert.equal(loaded.view.piUsageView(reading, clock).verifiedIdleZero, true);
   try {
     Date.now = () => clock;
@@ -99,7 +103,7 @@ test("mounted reads retain figures without current or idle badges after RPC fail
     assert.match(rendered(), /last known/);
     assert.match(rendered(), /30s/);
     assert.match(rendered(), /demo-task/);
-    assert.doesNotMatch(rendered(), /"Current"|"verified idle"|private transport failure/);
+    assert.doesNotMatch(rendered(), /"Current"|"verified idle"|"verified idle sources"|verified idle coverage|private transport failure/i);
     clock += 120_000;
     await loaded.renderer.act(async () => { visible(); });
     assert.match(rendered(), /2m/);
@@ -134,6 +138,24 @@ function renderFigures(input = {}) {
     ),
   };
 }
+
+test("contradicted idle coverage never renders affirmative idle badges or wording", () => {
+  for (const mutate of [
+    (snapshot) => { snapshot.coverage.pending_tails = 1; },
+    (snapshot) => { snapshot.quarantine = [{ source: "S01", ordinal: 1 }]; },
+    (snapshot) => { snapshot.coverage.sources[0].entries_in_window = 1; },
+    (snapshot) => { snapshot.tokens.input = 1; },
+    (snapshot) => { snapshot.main_unassigned.tokens.input = 1; },
+  ]) {
+    const snapshot = idleSnapshot();
+    mutate(snapshot);
+    const { html, view } = renderFigures({ text: JSON.stringify(snapshot) });
+    assert.equal(view.verifiedIdleZero, false);
+    assert.notEqual(view.figures.coverage.tone, "ok");
+    assert.match(html, /Idle claim not verified/);
+    assert.doesNotMatch(html, />verified idle(?: sources)?<|· verified idle coverage/i);
+  }
+});
 
 test("the section renders the producer's own rows and figures", () => {
   const { html } = renderFigures();

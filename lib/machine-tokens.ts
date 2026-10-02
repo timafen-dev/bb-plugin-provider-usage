@@ -32,6 +32,8 @@ export interface MachineTokenSlice {
   location: string;
   fileCount: number;
   daily: Record<string, TokenBucket>;
+  observedAt?: string;
+  retained?: boolean;
 }
 
 /** Everything one machine reports about its own transcripts. */
@@ -57,6 +59,14 @@ function real(path: string): string {
   } catch {
     return path;
   }
+}
+
+function sliceObservation(files: FileScanResult[]): Pick<MachineTokenSlice, "observedAt" | "retained"> {
+  if (!files.some((file) => file.observedAt !== undefined)) return {};
+  return {
+    observedAt: files.map((file) => file.observedAt ?? "1970-01-01T00:00:00.000Z").sort()[0],
+    retained: files.some((file) => file.retained === true),
+  };
 }
 
 /** Split one machine's scan into per-provider slices keyed by location. */
@@ -100,6 +110,7 @@ export function slicesFromScan(
       location,
       fileCount: 1,
       daily: file.daily,
+      ...sliceObservation([file]),
     });
   }
   return [
@@ -108,6 +119,7 @@ export function slicesFromScan(
       location: locationOf(provider),
       fileCount: scan.files.filter((file) => belongsTo(provider, file.path)).length,
       daily,
+      ...sliceObservation(scan.files.filter((file) => belongsTo(provider, file.path))),
     })),
     ...databases.values(),
   ];
@@ -145,12 +157,12 @@ export function mergeMachineTokens(
     `${source.tokens!.computer}\0${slice.provider}\0${slice.location}`;
   for (const source of sources) {
     if (!source.tokens) continue;
-    const parsedAt = Date.parse(source.tokens.scannedAt);
-    const at = Number.isFinite(parsedAt) && parsedAt <= nowMs ? parsedAt : -Infinity;
     for (const slice of source.tokens.slices) {
+      const parsedAt = Date.parse(slice.observedAt ?? source.tokens.scannedAt);
+      const at = Number.isFinite(parsedAt) && parsedAt <= nowMs ? parsedAt : -Infinity;
       const key = keyOf(source, slice);
       const prior = selected.get(key);
-      if (!prior || at > prior.at || (at === prior.at && prior.source.error && !source.error)) {
+      if (!prior || at > prior.at || (at === prior.at && (prior.source.error || prior.slice.retained) && !source.error && !slice.retained)) {
         selected.set(key, { source, slice, at });
       }
     }
@@ -188,8 +200,11 @@ export function mergeMachineTokens(
         daily[day] = row;
       }
     }
-    const age = nowMs - Date.parse(source.tokens.scannedAt);
-    const stale = !Number.isFinite(age) || age < 0 || age >= MACHINE_TOKENS_FRESH_MS;
+    const sourceAge = nowMs - Date.parse(source.tokens.scannedAt);
+    const stale = !Number.isFinite(sourceAge) || sourceAge < 0 || sourceAge >= MACHINE_TOKENS_FRESH_MS || source.tokens.slices.some((slice) => {
+      const age = nowMs - Date.parse(slice.observedAt ?? source.tokens!.scannedAt);
+      return slice.retained || !Number.isFinite(age) || age < 0 || age >= MACHINE_TOKENS_FRESH_MS;
+    });
     machines.push({
       id: source.id,
       name: source.name,

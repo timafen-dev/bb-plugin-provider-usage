@@ -420,26 +420,27 @@ export interface PiCoverageView {
 
 const COVERAGE_LABELS: Record<PiCoverageStatus, string> = {
   readable: "Readable",
-  verified_idle_zero: "Verified idle",
+  verified_idle_zero: "Idle claim not verified",
   unreadable: "Unreadable",
   never_ingested: "Never ingested",
   partial: "Partial",
   conflicting_binding: "Conflicting binding",
 };
 
-function coverageTone(status: PiCoverageStatus): PiTone {
-  if (status === "readable" || status === "verified_idle_zero") return "ok";
+function coverageTone(status: PiCoverageStatus, verifiedIdleZero: boolean): PiTone {
+  if (status === "verified_idle_zero") return verifiedIdleZero ? "ok" : "degraded";
+  if (status === "readable") return "ok";
   if (status === "partial") return "degraded";
   return "unavailable";
 }
 
-function coverageView(snapshot: PiUsageSnapshot): PiCoverageView {
+function coverageView(snapshot: PiUsageSnapshot, verifiedIdleZero: boolean): PiCoverageView {
   const { coverage } = snapshot;
   const counters: PiCoverageCounter[] = [
     { id: "readable", label: "Readable sources", value: coverage.readable, gap: false },
     {
       id: "verified_idle_zero",
-      label: "Verified idle sources",
+      label: verifiedIdleZero ? "Verified idle sources" : "Reported idle sources",
       value: coverage.verified_idle_zero,
       gap: false,
     },
@@ -494,11 +495,12 @@ function coverageView(snapshot: PiUsageSnapshot): PiCoverageView {
   const hasGaps =
     counters.some((counter) => counter.gap && counter.value > 0) ||
     snapshot.quarantine.length > 0 ||
-    coverageTone(coverage.status) !== "ok";
+    coverageTone(coverage.status, verifiedIdleZero) !== "ok";
   return {
     status: coverage.status,
-    label: COVERAGE_LABELS[coverage.status],
-    tone: coverageTone(coverage.status),
+    label: coverage.status === "verified_idle_zero" && verifiedIdleZero
+      ? "Verified idle" : COVERAGE_LABELS[coverage.status],
+    tone: coverageTone(coverage.status, verifiedIdleZero),
     partial: coverage.status === "partial" || coverage.partial > 0,
     hasGaps,
     declaredSources: coverage.declared_sources,
@@ -506,8 +508,9 @@ function coverageView(snapshot: PiUsageSnapshot): PiCoverageView {
     sources: coverage.sources.map((source) => ({
       alias: source.alias,
       status: source.status,
-      statusLabel: COVERAGE_LABELS[source.status],
-      tone: coverageTone(source.status),
+      statusLabel: source.status === "verified_idle_zero" && verifiedIdleZero
+        ? "Verified idle" : COVERAGE_LABELS[source.status],
+      tone: coverageTone(source.status, verifiedIdleZero),
       entries: source.entries_in_window,
       lastIngest: source.last_ingest,
     })),
@@ -885,9 +888,9 @@ export function piUsageView(reading: PiReading | null, nowMs: number): PiUsageVi
         : Number.isFinite(freshness.ageSeconds)
           ? freshness.ageSeconds
           : null;
-  const coverage = snapshot ? coverageView(snapshot) : null;
-  const partialCoverage = coverage !== null && (coverage.partial || coverage.hasGaps);
   const verifiedIdleZero = piVerifiedIdleZero(reading);
+  const coverage = snapshot ? coverageView(snapshot, verifiedIdleZero) : null;
+  const partialCoverage = coverage !== null && (coverage.partial || coverage.hasGaps);
   // Green is reserved: a fresh, first-hand reading whose coverage the producer
   // itself reports as complete. A partial window, a retained figure, a stale
   // or future stamp, or any failure state is not it.

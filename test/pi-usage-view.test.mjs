@@ -703,6 +703,44 @@ test("a verified idle window is the one zero that is an observation", () => {
   assert.equal(idle.verifiedIdleZero, true);
   assert.equal(idle.status.tone, "ok");
   assert.equal(idle.figures.coverage.hasGaps, false);
+  assert.equal(idle.figures.coverage.label, "Verified idle");
+  assert.equal(idle.figures.coverage.tone, "ok");
+  const contradictions = [
+    (snapshot) => { snapshot.coverage.pending_tails = 1; },
+    (snapshot) => { snapshot.quarantine = [{ source: "S01", ordinal: 1 }]; },
+    (snapshot) => { snapshot.coverage.sources[0].status = "readable"; },
+    (snapshot) => { snapshot.coverage.sources[0].entries_in_window = 1; },
+    ...["input", "output", "cache_read", "cache_write", "reasoning"].map((field) => (snapshot) => {
+      snapshot.tokens[field] = 1;
+      if (field === "reasoning") snapshot.tokens.output = 1;
+    }),
+    ...[
+      ["tasks", "task_key", "demo"], ["requested_models", "requested_model", "model"],
+      ["work_items", "work_item", "demo · author"], ["days", "day", "2026-10-01"],
+      ["hours", "hour", "2026-10-01T22+00:00"], ["live", "bin_start", "2026-10-01T22:50:00Z"],
+      ["roles", "role", "main"], ["main_unassigned", null, null],
+    ].flatMap(([dimension, key, identity]) => ["calls", "tokens"].map((kind) => (snapshot) => {
+      const amount = zeroAmount(key ? { [key]: identity } : {});
+      if (kind === "calls") { amount.calls = 1; amount.missing_cost_calls = 1; }
+      else amount.tokens.input = 1;
+      if (dimension === "main_unassigned") snapshot.main_unassigned = amount;
+      else if (dimension === "roles") snapshot.roles[0] = amount;
+      else if (dimension === "live") snapshot.live_bins.bins = [amount];
+      else snapshot[dimension] = [amount];
+    })),
+  ];
+  for (const mutate of contradictions) {
+    const snapshot = JSON.parse(idleText);
+    mutate(snapshot);
+    const contradicted = viewOf(JSON.stringify(snapshot));
+    assert.equal(contradicted.status.status, "ok");
+    assert.equal(contradicted.verifiedIdleZero, false);
+    assert.notEqual(contradicted.figures.coverage.tone, "ok");
+    assert.notEqual(contradicted.status.tone, "ok");
+    assert.notEqual(contradicted.figures.coverage.label, "Verified idle");
+    assert.ok(contradicted.figures.coverage.sources.every((source) => source.statusLabel !== "Verified idle"));
+    assert.ok(contradicted.figures.coverage.counters.every((counter) => counter.label !== "Verified idle sources"));
+  }
   assert.equal(idle.figures.cost.kind, "none");
   assert.equal(idle.figures.cost.text, "—");
   assert.equal(idle.figures.tokens.recorded, 0);
@@ -718,6 +756,8 @@ test("a verified idle window is the one zero that is an observation", () => {
   assert.equal(late.status.status, "stale");
   assert.equal(late.verifiedIdleZero, false);
   assert.notEqual(late.status.tone, "ok");
+  assert.notEqual(late.figures.coverage.label, "Verified idle");
+  assert.notEqual(late.figures.coverage.tone, "ok");
 });
 
 test("a stale export shows real figures that are explicitly not current", () => {

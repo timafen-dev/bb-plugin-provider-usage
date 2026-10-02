@@ -1105,7 +1105,7 @@ function HomepageUsage() {
                 <p className="truncate text-sm font-medium">{provider.displayName}</p>
                 <p className="truncate text-xs text-muted-foreground">
                   {hero
-                    ? `${hero.label} · ${formatPercent(hero.remainingPercent)} left`
+                    ? `${provider.status === "stale" ? "Last known · " : ""}${hero.label} · ${formatPercent(hero.remainingPercent)} left`
                     : statusLabel(provider.status)}
                 </p>
               </div>

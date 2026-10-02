@@ -19,6 +19,8 @@ import {
   PROVIDER_KEYS,
   assembleDashboard,
   formatDashboardText,
+  providerIsOmitted,
+  PROVIDER_META,
   type DashboardSnapshot,
   type ProviderKey,
   type ProviderLimitSlice,
@@ -510,7 +512,13 @@ async function loadDashboard(
   // Hidden machines go before anything else: the panel walks this list to
   // decide which sections to draw, so a machine left in it is a section.
   const hosts = everyHost.filter((host) => !isMachineHidden(hidden, host));
-  if (everyHost.length > 0 && hosts.length === 0) {
+  const selectedHostId = hostId && hosts.some((host) => host.id === hostId) ? hostId : null;
+  const primaryHostId = selectedHostId === null
+    ? (await bb.sdk.system.config().catch(() => null))?.primaryHostId ?? null
+    : null;
+  const resolvedHostId = selectedHostId ?? primaryHostId;
+  const owner = everyHost.find((host) => host.id === resolvedHostId) ?? null;
+  if ((everyHost.length > 0 && hosts.length === 0) || (owner !== null && isMachineHidden(hidden, owner))) {
     return assembleDashboard({
       limits: Object.fromEntries(PROVIDER_KEYS.map((key) =>
         [key, { status: "not_installed", windows: [] }],
@@ -520,40 +528,25 @@ async function loadDashboard(
       hostId: null,
     });
   }
-  const resolvedHostId =
-    hostId && hosts.some((host) => host.id === hostId)
-      ? hostId
-      : hosts.length < everyHost.length ? hosts[0]!.id : null;
+  const omitted = hiddenProvidersFor(hidden, owner);
   const [slices, catalog] = await Promise.all([
     limitsStore.get(resolvedHostId, force),
     bb.sdk.providers.list(resolvedHostId ? { hostId: resolvedHostId } : {}),
   ]);
 
   const codexSupplement =
-    resolvedHostId === null && slices.codex.status === "ok"
+    selectedHostId === null && slices.codex.status === "ok" && !providerIsOmitted("codex", omitted)
       ? await readCodexUsageSupplement()
       : null;
 
-  const snapshot = assembleDashboard({
+  return assembleDashboard({
     limits: slices,
+    omittedProviders: omitted,
     supplements: codexSupplement ? { codex: codexSupplement } : undefined,
     hosts,
     catalog,
     hostId: resolvedHostId,
   });
-  const omitted = hiddenProvidersFor(
-    hidden,
-    hosts.find((host) => host.id === resolvedHostId) ?? null,
-  );
-  if (omitted.size === 0) return snapshot;
-  return {
-    ...snapshot,
-    providers: snapshot.providers.filter(
-      (provider) =>
-        !omitted.has(provider.id.toLowerCase()) &&
-        !omitted.has(provider.key.toLowerCase()),
-    ),
-  };
 }
 
 type AccountReadback = {
@@ -601,14 +594,17 @@ async function loadAccountReadback(
 
   const accounts = await Promise.all(
     hosts.map(async (host) => {
+      const omitted = hiddenProvidersFor(hidden, host);
       const unknownAccounts = (message: string) =>
-        (["codex", "claude-code"] as const).map((providerId) => ({
-          key: `${host.id}:${providerId}`,
+        (["codex", "claudeCode"] as const)
+        .filter((key) => !providerIsOmitted(key, omitted))
+        .map((key) => ({
+          key: `${host.id}:${PROVIDER_META[key].id}`,
           machineId: host.id,
           machineName: host.name,
-          providerId,
+          providerId: PROVIDER_META[key].id as "codex" | "claude-code",
           source:
-            providerId === "codex"
+            key === "codex"
               ? ("system.usageLimits" as const)
               : ("host.claudeUsage" as const),
           status: "unknown" as const,
@@ -619,7 +615,7 @@ async function loadAccountReadback(
           credits: null,
           resetCredits: null,
           enrichmentScope:
-            providerId === "codex" ? ("primary-only" as const) : null,
+            key === "codex" ? ("primary-only" as const) : null,
           checkedAt: new Date().toISOString(),
         }));
 
@@ -751,7 +747,20 @@ type PersistedTokenFile = {
   keyedEvents?: FileScanResult["keyedEvents"];
   blobCount?: number;
   maxRowid?: number;
+  observedAt?: string;
 };
+
+type LocalTokenScan = Awaited<ReturnType<typeof scanTokenFiles>> & { scannedAt: string };
+
+async function scanLocalTokens(options: Parameters<typeof scanTokenFiles>[0]): Promise<LocalTokenScan> {
+  const scanned = await scanTokenFiles(options);
+  const scannedAt = new Date().toISOString();
+  return {
+    ...scanned,
+    scannedAt,
+    files: scanned.files.map((file) => ({ ...file, observedAt: scannedAt })),
+  };
+}
 
 function isPersistedTokenFile(value: unknown): value is PersistedTokenFile {
   if (!value || typeof value !== "object") return false;
@@ -808,6 +817,7 @@ function createTokenStore(bb: BbPluginApi) {
         mtimeMs: row.mtime_ms,
         size: row.size,
         daily: persisted.daily,
+        observedAt: persisted.observedAt,
         ...(persisted.keyedEvents
           ? { keyedEvents: persisted.keyedEvents }
           : {}),
@@ -851,6 +861,7 @@ function createTokenStore(bb: BbPluginApi) {
           JSON.stringify({
             version: 2,
             daily: file.daily,
+            observedAt: file.observedAt,
             ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
             ...(file.blobCount != null
               ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
@@ -861,6 +872,7 @@ function createTokenStore(bb: BbPluginApi) {
           mtimeMs: file.mtimeMs,
           size: file.size,
           daily: file.daily,
+          observedAt: file.observedAt,
           ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
           ...(file.blobCount != null
             ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
@@ -930,6 +942,7 @@ function createTokenStore(bb: BbPluginApi) {
       files: FileScanResult[];
       changedFiles: number;
       daily: Record<string, Record<string, TokenBucket>>;
+      scannedAt: string;
     },
   ): TokenSnapshot => {
     const merged = mergeMachineTokens(
@@ -941,7 +954,7 @@ function createTokenStore(bb: BbPluginApi) {
           error: null,
           tokens: {
             computer: hostname(),
-            scannedAt: new Date().toISOString(),
+            scannedAt: local.scannedAt,
             changedFiles: local.changedFiles,
             slices: slicesFromScan(local),
           },
@@ -972,6 +985,7 @@ function createTokenStore(bb: BbPluginApi) {
       files: FileScanResult[];
       changedFiles: number;
       daily: Record<string, Record<string, TokenBucket>>;
+      scannedAt: string;
     },
   ) => {
     const snapshot = combine(days, scanned);
@@ -990,11 +1004,12 @@ function createTokenStore(bb: BbPluginApi) {
   const paintCachedStores = (
     scanned: {
       sources: string[];
+      files: FileScanResult[];
       daily: Record<string, Record<string, TokenBucket>>;
     },
   ) => {
-    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "cursor");
-    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "opencode");
+    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "cursor", scanned.files);
+    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "opencode", scanned.files);
   };
 
   /**
@@ -1044,13 +1059,13 @@ function createTokenStore(bb: BbPluginApi) {
       // jsonl (Codex/Claude) is the cheap first paint. Seed cursor/opencode
       // from the last persisted totals so those series never vanish while
       // the heavier stores refresh.
-      const jsonl = await scanTokenFiles({
+      const jsonl = await scanLocalTokens({
         cached,
         includeCursor: false,
         includeOpencode: false,
       });
       persistFiles(jsonl.files);
-      if (!force) paintCachedStores(jsonl);
+      paintCachedStores(jsonl);
       snapshotFrom(days, jsonl);
       publish();
       bb.log.info(
@@ -1059,7 +1074,7 @@ function createTokenStore(bb: BbPluginApi) {
 
       const phase2Started = Date.now();
       const [full] = await Promise.all([
-        scanTokenFiles({
+        scanLocalTokens({
           cached: loadCache,
           includeCursor: true,
           includeOpencode: true,
@@ -1071,6 +1086,7 @@ function createTokenStore(bb: BbPluginApi) {
         ),
       ]);
       persistFiles(full.files);
+      paintCachedStores(full);
       const bbUsage = await scanBbThreads(nowMs);
       bbUsageDaily = bbUsage.daily;
       bbUsageProviders = bbUsage.providers;
@@ -1096,11 +1112,12 @@ function createTokenStore(bb: BbPluginApi) {
     if (force) return sync(days, true);
     if (lastSnapshot) {
       if (lastSnapshot.days !== days) {
-        const scanned = await scanTokenFiles({
+        const scanned = await scanLocalTokens({
           cached: loadCache,
           includeCursor: hasCursorCache(),
           includeOpencode: hasOpencodeCache(),
         });
+        persistFiles(scanned.files);
         paintCachedStores(scanned);
         return combine(days, scanned);
       }
@@ -1114,7 +1131,7 @@ function createTokenStore(bb: BbPluginApi) {
       }
       return lastSnapshot;
     }
-    const jsonl = await scanTokenFiles({
+    const jsonl = await scanLocalTokens({
       cached: loadCache,
       includeCursor: false,
       includeOpencode: false,

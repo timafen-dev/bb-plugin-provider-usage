@@ -76,6 +76,7 @@ export function createHostTokenHistory(options: {
       includeCursor: true,
       includeOpencode: true,
     });
+    const scannedAt = new Date(now()).toISOString();
     // Rebuilt from this scan alone, so files that aged out or were deleted
     // stop taking up room.
     const next = new Map(result.files.map((file) => [file.path, entryFrom(file)]));
@@ -86,7 +87,7 @@ export function createHostTokenHistory(options: {
     }
     last = {
       computer,
-      scannedAt: new Date(now()).toISOString(),
+      scannedAt,
       changedFiles: result.changedFiles,
       slices: slicesFromScan(result),
     };
