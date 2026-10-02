@@ -8,7 +8,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
-import { hostContract } from "./host-contract.js";
+import { PI_HOST_READ_VERSION, hostContract, type ExternalPiUsageRead } from "./host-contract.js";
 import {
   claudeDirectory,
   planLabel,
@@ -16,6 +16,7 @@ import {
   type ClaudeMachineUsage,
 } from "./lib/claude-machine.js";
 import { createHostTokenHistory } from "./lib/host-token-history.js";
+import { readPiExportFacts } from "./lib/pi-usage-source.js";
 
 let tokenHistory: ReturnType<typeof createHostTokenHistory> | null = null;
 
@@ -115,6 +116,17 @@ export default experimental_defineHostEntry({
         };
       }
     },
+    /**
+     * The Firstmate Pi export, read from the fixed location on this machine's
+     * own home. Pi runs its agents outside bb, so this is the only way its
+     * work can be accounted for at all — and it stays a read: no session, no
+     * transcript, no credential and no auth store is opened, and the snapshot
+     * is a replacement dataset rather than a stream to bill again.
+     */
+    externalPiUsage: async (): Promise<ExternalPiUsageRead> => ({
+      version: PI_HOST_READ_VERSION,
+      ...(await readPiExportFacts({ home: homedir() })),
+    }),
     tokenHistory: async ({ force }, context) => {
       tokenHistory ??= createHostTokenHistory({
         dataDir: context.experimental_paths.dataDir,

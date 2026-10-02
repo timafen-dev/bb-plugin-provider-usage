@@ -225,6 +225,43 @@ stays under the reserved `main_unassigned` key rather than being attributed to a
 task. A folded `others` row is an aggregate, never a real task and never a BB
 thread.
 
+### Where it reads from, and what it refuses
+
+One machine, one location, compiled in:
+
+```
+~/.local/state/pi-usage/snapshot.json              the artifact
+~/.local/state/pi-usage/snapshot.json.status.json  the producer's failure note
+```
+
+That is the location the producer's own documented `export` operation writes,
+and the plugin names it in source rather than taking it from a caller. The host
+read `externalPiUsage` therefore takes **`null`** as its input: there is no
+path, root, command or machine selector an RPC could supply, so no caller can
+ask this plugin to read a file of its choosing. The machine that is asked is
+the one approved owning machine (`homeserver` in the holding's machine list),
+resolved by the server from its own machine list — other machines are never
+swept, two machines answering to that name are an ambiguity rather than a pair
+to add up, and an unknown or offline owning machine is reported as unavailable.
+
+The read itself is designed to be refusable:
+
+- a link under either name is **refused, not followed**, so the agreed file
+  name cannot be pointed at a session transcript or an auth store;
+- the export directory must resolve inside the owning account's own home;
+- anything that is not a regular file is refused;
+- the size is bounded at the agreed 2 MiB **before** any byte is decoded, and
+  the read stops one byte past the bound, so a file that grows between the
+  check and the read still cannot be loaded;
+- a note that exists but cannot be read stays a failure, while a note that
+  could not be *looked for* at all is neither a failure nor an absence: it
+  cannot clear a failure the previous poll saw, and the figures beside it are
+  shown as degraded rather than current.
+
+No session, transcript, credential or auth store is opened anywhere on this
+path, and a refusal travels as a stable code with fixed wording — never a path,
+a home directory, a machine name or an exception message.
+
 ### Activation is a separate, approved step
 
 This is **implementation-ready, not installed and not live**. Reading a snapshot

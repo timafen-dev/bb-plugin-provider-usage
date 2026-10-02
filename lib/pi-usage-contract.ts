@@ -189,7 +189,7 @@ function amountShape() {
   };
 }
 
-const piSnapshotSchema = z
+export const piSnapshotSchema = z
   .object({
     schema_version: z.literal(1),
     kind: z.literal("pi_usage_snapshot"),
@@ -898,17 +898,78 @@ export interface PiReading {
   recoveredFromFailure: boolean;
 }
 
-export interface PiReadInput {
+/* --------------------------------------------------------------- read facts */
+
+/**
+ * What a confined read of the owning machine's export location found, once the
+ * bytes have already been judged by this module.
+ *
+ * The split matters. The host entry owns the disk: it locates the one approved
+ * file, refuses a symlink or an oversized one, and turns what it read into
+ * these facts. The server owns the reading: it decides freshness against its
+ * own clock and remembers what the last poll saw. Neither the host's clock nor
+ * a file's modification time can therefore make an old export look current.
+ */
+export type PiArtifactFact =
+  /** The owning machine has no snapshot placed. Not a zero. */
+  | { state: "absent" }
+  /** A snapshot that passed every check in this module. */
+  | { state: "valid"; snapshot: PiUsageSnapshot; bytes: number }
   /**
-   * The snapshot's text, or `null` when the owning host has none placed.
-   * `undefined` means the approved owning host itself was not available.
+   * A snapshot is present and may not be believed — refused by confinement
+   * before any parse, or refused by the contract after one. The reason is a
+   * stable code and the detail is fixed wording: neither carries a path, a
+   * received value or raw exception text.
    */
-  text?: string | null;
-  /** The `<artifact>.status.json` text, or `null` when absent. */
-  sidecarText?: string | null;
-  /** Last-good figures from an earlier poll, if the panel kept any. */
+  | { state: "refused"; reason: string; detail: string };
+
+export type PiSidecarFact =
+  /** No producer failure note — which is what a successful retry removes. */
+  | { state: "absent" }
+  /** The producer says its last export of this artifact failed. */
+  | { state: "failed"; errorClass: string | null }
+  /**
+   * A note is present and cannot be read. Still a failure: mistaking it for an
+   * absent note would present a failed export as a fresh observation.
+   */
+  | { state: "unreadable"; reason: string }
+  /**
+   * Whether a note is there at all could not be established. That is neither a
+   * failure nor an absence: it may not be reported as the producer having
+   * failed, and it may not clear a failure the last poll saw either, so the
+   * figures beside it are never a fresh verified observation.
+   */
+  | { state: "unknown"; reason: string };
+
+/** Text in, artifact fact out. */
+export function piArtifactFactFromText(text: string): PiArtifactFact {
+  const parsed = parsePiUsageSnapshot(text);
+  return parsed.ok
+    ? { state: "valid", snapshot: parsed.snapshot, bytes: parsed.bytes }
+    : { state: "refused", reason: parsed.reason, detail: parsed.detail };
+}
+
+/** Text in, sidecar fact out. `null` means no note was found. */
+export function piSidecarFactFromText(text: string | null): PiSidecarFact {
+  const read = parsePiStatusSidecar(text);
+  if (!read.present) return { state: "absent" };
+  return read.ok
+    ? { state: "failed", errorClass: read.sidecar.error_class ?? null }
+    : { state: "unreadable", reason: read.reason };
+}
+
+export interface PiReadFacts {
+  /**
+   * What the owning machine's export location held. `undefined` means the
+   * approved owning machine itself was not available, which is neither a
+   * missing snapshot nor a zero.
+   */
+  artifact?: PiArtifactFact;
+  /** The `<artifact>.status.json` note beside it. Absent when omitted. */
+  sidecar?: PiSidecarFact;
+  /** Last-good figures from an earlier poll, if the caller kept any. */
   retained?: PiUsageSnapshot | null;
-  /** Why the owning host could not be reached, when it could not. */
+  /** Why the owning machine could not be reached, when it could not. */
   unavailable?: { reason: string; detail: string };
   nowMs: number;
   graceSeconds?: number;
@@ -931,21 +992,22 @@ function retainedData(
 }
 
 /**
- * Turns one poll into a reading.
+ * Turns one poll's facts into a reading.
  *
  * Every snapshot is a complete replacement dataset: nothing here adds a poll
- * to the last one, so polling the same text twice yields the same totals and
- * no call is ever billed again. The order of the checks is deliberate — the
- * owning host first, then the producer's own failure note, then the artifact —
- * because a readable artifact beside a failure note may be an older generation
- * than the note refers to, and must not be shown as current.
+ * to the last one, so polling the same artifact twice yields the same totals
+ * and no call is ever billed again. The order of the checks is deliberate —
+ * the owning machine first, then the producer's own failure note, then the
+ * artifact — because a readable artifact beside a failure note may be an older
+ * generation than the note refers to, and must not be shown as current.
  */
-export function readPiUsage(input: PiReadInput): PiReading {
+export function readPiUsageFacts(input: PiReadFacts): PiReading {
   const grace = input.graceSeconds ?? PI_GRACE_SECONDS;
-  const sidecar = parsePiStatusSidecar(input.sidecarText ?? null);
-  const recoveredFromFailure = input.failedBefore === true && !sidecar.present;
+  const sidecar: PiSidecarFact = input.sidecar ?? { state: "absent" };
+  const recoveredFromFailure = input.failedBefore === true && sidecar.state === "absent";
+  const artifact = input.artifact;
 
-  if (input.text === undefined) {
+  if (artifact === undefined) {
     return {
       status: "unavailable",
       reason: input.unavailable?.reason ?? "owning_host_unavailable",
@@ -957,33 +1019,33 @@ export function readPiUsage(input: PiReadInput): PiReading {
     };
   }
 
-  const parsed = input.text === null ? null : parsePiUsageSnapshot(input.text);
-
-  if (sidecar.present) {
+  if (sidecar.state === "failed" || sidecar.state === "unreadable") {
     // The note wins: the artifact on disk may predate the failed export.
-    const current =
-      parsed && parsed.ok
+    const current: PiReadingData | null =
+      artifact.state === "valid"
         ? {
-            snapshot: parsed.snapshot,
-            freshness: piFreshness(parsed.snapshot.generated_at, input.nowMs, grace),
+            snapshot: artifact.snapshot,
+            freshness: piFreshness(artifact.snapshot.generated_at, input.nowMs, grace),
             degraded: true,
             retained: false,
           }
         : retainedData(input.retained, input.nowMs, grace);
     return {
       status: "failed",
-      reason: sidecar.ok
-        ? `producer_failed:${sidecar.sidecar.error_class ?? "unknown"}`
-        : `producer_failed_note_unreadable:${sidecar.reason}`,
-      detail: sidecar.ok
-        ? "the producer reported that its last export failed; these figures are not current"
-        : "the producer left a failure note this panel cannot read; these figures are not current",
+      reason:
+        sidecar.state === "failed"
+          ? `producer_failed:${sidecar.errorClass ?? "unknown"}`
+          : `producer_failed_note_unreadable:${sidecar.reason}`,
+      detail:
+        sidecar.state === "failed"
+          ? "the producer reported that its last export failed; these figures are not current"
+          : "the producer left a failure note this panel cannot read; these figures are not current",
       data: current,
       recoveredFromFailure: false,
     };
   }
 
-  if (parsed === null) {
+  if (artifact.state === "absent") {
     return {
       status: "missing",
       reason: "snapshot_not_placed",
@@ -993,41 +1055,84 @@ export function readPiUsage(input: PiReadInput): PiReading {
     };
   }
 
-  if (!parsed.ok) {
+  if (artifact.state === "refused") {
     return {
       status: "invalid",
-      reason: `snapshot_rejected:${parsed.reason}`,
-      detail: parsed.detail,
+      reason: `snapshot_rejected:${artifact.reason}`,
+      detail: artifact.detail,
       data: retainedData(input.retained, input.nowMs, grace),
       recoveredFromFailure,
     };
   }
 
-  const freshness = piFreshness(parsed.snapshot.generated_at, input.nowMs, grace);
+  const freshness = piFreshness(artifact.snapshot.generated_at, input.nowMs, grace);
   const status: PiReadingStatus =
     freshness.state === "fresh" ? "ok" : freshness.state === "stale" ? "stale" : "future";
+  // A snapshot whose failure note could not even be looked for may be the
+  // leftover of an export that failed, so it is shown as degraded.
+  const noteUnknown = sidecar.state === "unknown";
   return {
     status,
     reason:
       status === "ok"
-        ? "fresh"
+        ? noteUnknown
+          ? `fresh_failure_note_unchecked:${sidecar.reason}`
+          : "fresh"
         : status === "stale"
           ? "snapshot_older_than_grace"
           : "snapshot_generated_in_the_future",
     detail:
       status === "ok"
-        ? "a verified Firstmate Pi snapshot"
+        ? noteUnknown
+          ? "a Firstmate Pi snapshot whose producer failure note could not be checked"
+          : "a verified Firstmate Pi snapshot"
         : status === "stale"
           ? "the last Firstmate Pi snapshot is older than the expected refresh window"
           : "the Firstmate Pi snapshot is stamped ahead of this machine's clock",
     data: {
-      snapshot: parsed.snapshot,
+      snapshot: artifact.snapshot,
       freshness,
-      degraded: status !== "ok",
+      degraded: status !== "ok" || noteUnknown,
       retained: false,
     },
     recoveredFromFailure,
   };
+}
+
+export interface PiReadInput {
+  /**
+   * The snapshot's text, or `null` when the owning host has none placed.
+   * `undefined` means the approved owning host itself was not available.
+   */
+  text?: string | null;
+  /** The `<artifact>.status.json` text, or `null` when absent. */
+  sidecarText?: string | null;
+  /** Last-good figures from an earlier poll, if the panel kept any. */
+  retained?: PiUsageSnapshot | null;
+  /** Why the owning host could not be reached, when it could not. */
+  unavailable?: { reason: string; detail: string };
+  nowMs: number;
+  graceSeconds?: number;
+  /** Whether the previous poll saw a producer failure note. */
+  failedBefore?: boolean;
+}
+
+/** The text-level convenience over {@link readPiUsageFacts}. */
+export function readPiUsage(input: PiReadInput): PiReading {
+  return readPiUsageFacts({
+    artifact:
+      input.text === undefined
+        ? undefined
+        : input.text === null
+          ? { state: "absent" }
+          : piArtifactFactFromText(input.text),
+    sidecar: piSidecarFactFromText(input.sidecarText ?? null),
+    retained: input.retained,
+    unavailable: input.unavailable,
+    nowMs: input.nowMs,
+    graceSeconds: input.graceSeconds,
+    failedBefore: input.failedBefore,
+  });
 }
 
 /* ------------------------------------------------------------------- idle/0 */
