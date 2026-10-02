@@ -512,20 +512,19 @@ async function loadDashboard(
   // Hidden machines go before anything else: the panel walks this list to
   // decide which sections to draw, so a machine left in it is a section.
   const hosts = everyHost.filter((host) => !isMachineHidden(hidden, host));
-  const selectedHostId = hostId && hosts.some((host) => host.id === hostId) ? hostId : null;
-  const primaryHostId = selectedHostId === null
-    ? (await bb.sdk.system.config().catch(() => null))?.primaryHostId ?? null
-    : null;
-  const resolvedHostId = selectedHostId ?? primaryHostId;
+  const resolvedHostId = hostId ??
+    (await bb.sdk.system.config().catch(() => null))?.primaryHostId ?? null;
   const owner = everyHost.find((host) => host.id === resolvedHostId) ?? null;
-  if ((everyHost.length > 0 && hosts.length === 0) || (owner !== null && isMachineHidden(hidden, owner))) {
+  if ((hostId !== null && !hosts.some((host) => host.id === hostId)) ||
+      (everyHost.length > 0 && hosts.length === 0) ||
+      (owner !== null && isMachineHidden(hidden, owner))) {
     return assembleDashboard({
       limits: Object.fromEntries(PROVIDER_KEYS.map((key) =>
         [key, { status: "not_installed", windows: [] }],
       )) as Record<ProviderKey, ProviderLimitSlice>,
       hosts,
       catalog: [],
-      hostId: null,
+      hostId: resolvedHostId,
     });
   }
   const omitted = hiddenProvidersFor(hidden, owner);
@@ -535,7 +534,7 @@ async function loadDashboard(
   ]);
 
   const codexSupplement =
-    selectedHostId === null && slices.codex.status === "ok" && !providerIsOmitted("codex", omitted)
+    hostId === null && slices.codex.status === "ok" && !providerIsOmitted("codex", omitted)
       ? await readCodexUsageSupplement()
       : null;
 
@@ -758,7 +757,6 @@ async function scanLocalTokens(options: Parameters<typeof scanTokenFiles>[0]): P
   return {
     ...scanned,
     scannedAt,
-    files: scanned.files.map((file) => ({ ...file, observedAt: scannedAt })),
   };
 }
 

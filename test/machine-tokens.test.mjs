@@ -201,7 +201,7 @@ test("host history reuses its parse cache and answers from disk after a restart"
     const scan = async ({ cached }) => {
       calls.push(cached.size);
       return {
-        files: [{ path: "/x/sessions/a.jsonl", mtimeMs: 1, size: 9, daily: {} }],
+        files: [{ path: "/x/sessions/a.jsonl", mtimeMs: 1, size: 9, daily: {}, observedAt: cached.get("/x/sessions/a.jsonl")?.observedAt ?? new Date(clock).toISOString() }],
         changedFiles: cached.size === 0 ? 1 : 0,
         sources: ["codex"],
         daily: { [today]: { codex: bucket(42) } },
@@ -221,7 +221,8 @@ test("host history reuses its parse cache and answers from disk after a restart"
     // A new worker starts from what the old one wrote.
     const second = createHostTokenHistory({ dataDir, computer: "pc", scan, now: () => clock });
     clock += 5 * 60_000;
-    await second.read({ force: true });
+    const retained = await second.read({ force: true });
+    assert.equal(retained.scannedAt, answer.scannedAt);
     assert.deepEqual(calls, [0, 1]);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
@@ -237,8 +238,8 @@ test("host history hands back the last answer while a slow scan continues", asyn
       count += 1;
       if (count === 2) await new Promise((resolve) => (release = resolve));
       return {
-        files: [],
-        changedFiles: 0,
+        files: [{ path: "/x/sessions/a.jsonl", mtimeMs: count, size: count, daily: {}, observedAt: new Date().toISOString() }],
+        changedFiles: 1,
         sources: [],
         daily: { [today]: { codex: bucket(count) } },
       };

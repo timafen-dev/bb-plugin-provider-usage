@@ -307,6 +307,28 @@ test("the chart draws one bar per recorded point, placed by time", () => {
   assert.match(html, /10s bins/);
 });
 
+test("live, hour, and day labels align with their recorded time coordinates", () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.hours.unshift({ ...snapshot.hours[0], hour: "2026-10-01T21+00:00" });
+  snapshot.days.unshift({ ...snapshot.days[0], day: "2026-09-30" });
+  const { view } = renderFigures({ text: JSON.stringify(snapshot) });
+  for (const kind of ["live", "hours", "days"]) {
+    const series = view.figures.series[kind];
+    const html = loaded.server.renderToStaticMarkup(
+      loaded.React.createElement(loaded.section.PiUsageSeriesChart, { series, width: 600 }),
+    );
+    const texts = [...html.matchAll(/<text\b([^>]*)>([^<]+)<\/text>/g)];
+    for (const point of [series.points[0], series.points.at(-1)]) {
+      const label = texts.find((match) => match[2] === point.label);
+      assert.ok(label, `${kind}: point label is visible`);
+      const x = Number(/\bx="([^"]+)"/.exec(label[1])[1]);
+      const expected = 48 + 542 * (point.startMs - series.domain.startMs) /
+        (series.domain.endMs - series.domain.startMs);
+      assert.ok(Math.abs(x - expected) < 1e-8, `${kind}: label is at the point's start coordinate`);
+    }
+  }
+});
+
 test("an hour chart keeps the offsets it was recorded with", () => {
   const { view } = renderFigures();
   const html = loaded.server.renderToStaticMarkup(

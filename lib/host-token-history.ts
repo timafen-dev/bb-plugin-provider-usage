@@ -19,6 +19,7 @@ function entryFrom(file: FileScanResult): FileCacheEntry {
     mtimeMs: file.mtimeMs,
     size: file.size,
     daily: file.daily,
+    observedAt: file.observedAt,
     ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
     ...(file.blobCount != null
       ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
@@ -67,6 +68,12 @@ export function createHostTokenHistory(options: {
     );
     cache = new Map(Array.isArray(rows) ? rows : []);
     last = await readJson<MachineTokens>(join(options.dataDir, LAST_FILE));
+    if (last) {
+      const observedAt = [...cache.values()].map((entry) =>
+        entry.observedAt ?? "1970-01-01T00:00:00.000Z",
+      ).sort()[0] ?? "1970-01-01T00:00:00.000Z";
+      if (observedAt < last.scannedAt) last.scannedAt = observedAt;
+    }
   };
 
   const scanOnce = async (): Promise<MachineTokens> => {
@@ -76,7 +83,9 @@ export function createHostTokenHistory(options: {
       includeCursor: true,
       includeOpencode: true,
     });
-    const scannedAt = new Date(now()).toISOString();
+    const scannedAt = result.files.map((file) =>
+      file.observedAt ?? "1970-01-01T00:00:00.000Z",
+    ).sort()[0] ?? "1970-01-01T00:00:00.000Z";
     // Rebuilt from this scan alone, so files that aged out or were deleted
     // stop taking up room.
     const next = new Map(result.files.map((file) => [file.path, entryFrom(file)]));
@@ -89,7 +98,9 @@ export function createHostTokenHistory(options: {
       computer,
       scannedAt,
       changedFiles: result.changedFiles,
-      slices: slicesFromScan(result),
+      slices: slicesFromScan(result).map(({ provider, location, fileCount, daily }) =>
+        ({ provider, location, fileCount, daily }),
+      ),
     };
     await writeJson(join(options.dataDir, LAST_FILE), last);
     return last;

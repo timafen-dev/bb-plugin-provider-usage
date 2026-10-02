@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { registerHooks } from "node:module";
 import test from "node:test";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
@@ -154,6 +156,68 @@ test("a hidden primary is not replaced by the first visible peer", async () => {
     }
     const visible = await harness.behavior.callRpc("getDashboard", { hostId: "host-2", force: true });
     assert.equal(visible.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("explicit hidden requests never substitute a visible primary", async (t) => {
+  const home = await mkdtemp(join(process.cwd(), ".test-account-home-"));
+  const saved = { ...process.env };
+  t.after(async () => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+    await rm(home, { recursive: true, force: true });
+  });
+  Object.assign(process.env, {
+    HOME: home, CODEX_HOME: join(home, "codex"), CLAUDE_CONFIG_DIR: join(home, "claude"),
+    MUSE_HOME: join(home, "muse"), XDG_DATA_HOME: join(home, ".local", "share"),
+  });
+  const asked = [];
+  const harness = await setup({
+    readUsageLimits: ({ hostId } = {}) => {
+      asked.push(hostId);
+      return { ...usageLimits(hostId), codex: emptyProvider };
+    },
+  });
+  try {
+    await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.deepEqual(asked, ["host-1"]);
+    await harness.behavior.setSettings({ panelHidden: "PC 2" });
+    for (const force of [false, true]) {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: "host-2", force });
+      assert.equal(dashboard.hostId, "host-2");
+      assert.deepEqual(dashboard.providers, []);
+      assert.equal(dashboard.totals.trackedProviders, 0);
+    }
+    const json = await harness.behavior.runCli(["--machine", "host-2", "--json"]);
+    assert.deepEqual(JSON.parse(json.stdout).providers, []);
+    assert.equal(JSON.parse(json.stdout).hostId, "host-2");
+    const text = await harness.behavior.runCli(["--machine", "host-2", "--force"]);
+    assert.match(text.stdout, /Usage · Selected machine/);
+    assert.doesNotMatch(text.stdout.split("Token usage ·")[0], /PC 1|claude-one/);
+    assert.deepEqual(asked, ["host-1"]);
+    const primary = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.equal(primary.hostId, "host-1");
+    assert.equal(primary.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-one@example.test");
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("no paired machines retains the implicit native presentation", async () => {
+  const harness = await setup({
+    listedHosts: [], primaryHostId: null,
+    readUsageLimits: () => ({
+      codex: emptyProvider, "claude-code": emptyProvider, "acp-cursor": emptyProvider,
+      muse: { status: "ok", windows: [window(40)] },
+    }),
+  });
+  try {
+    const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.deepEqual(dashboard.hosts, []);
+    assert.equal(dashboard.providers.find((row) => row.key === "muse").status, "ok");
+    assert.equal(dashboard.totals.cumulativeRemainingPercent, 60);
   } finally {
     await harness.lifecycle.dispose();
   }

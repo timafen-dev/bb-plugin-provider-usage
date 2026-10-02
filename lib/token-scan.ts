@@ -394,6 +394,15 @@ export function seedDailyFromCache(
   return retained.length;
 }
 
+function observedFile(file: FileScanResult, prior: FileCacheEntry | undefined): FileScanResult {
+  const retained = file.daily === prior?.daily;
+  return {
+    ...file,
+    observedAt: retained ? prior?.observedAt ?? "1970-01-01T00:00:00.000Z" : new Date().toISOString(),
+    retained,
+  };
+}
+
 export async function scanTokenFiles(options?: {
   nowMs?: number;
   includeCursor?: boolean;
@@ -446,13 +455,13 @@ export async function scanTokenFiles(options?: {
         : { daily: prior.daily, keyedEvents: prior.keyedEvents };
       if (stale) changedFiles += 1;
 
-      files.push({
+      files.push(observedFile({
         path,
         mtimeMs: Math.round(info.mtimeMs),
         size: info.size,
         daily: parsed.daily,
         ...(parsed.keyedEvents ? { keyedEvents: parsed.keyedEvents } : {}),
-      });
+      }, prior));
 
       for (const [day, bucket] of Object.entries(parsed.daily) as Array<
         [string, TokenBucket]
@@ -504,7 +513,7 @@ export async function scanTokenFiles(options?: {
       ) {
         changedFiles += 1;
       }
-      files.push(file);
+      files.push(observedFile(file, prior));
     }
     mergeCursorDaily(daily, cursorFiles);
   }
@@ -518,7 +527,7 @@ export async function scanTokenFiles(options?: {
       if (!prior || prior.mtimeMs !== file.mtimeMs || prior.size !== file.size) {
         changedFiles += 1;
       }
-      files.push(file);
+      files.push(observedFile(file, prior));
     }
     mergeOpencodeDaily(daily, opencodeFiles);
   }

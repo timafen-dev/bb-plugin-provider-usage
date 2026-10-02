@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
-import { hostname } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
@@ -17,6 +17,9 @@ registerHooks({
 });
 const { default: plugin } = await import("../server.ts");
 const { dayKey } = await import("../lib/tokens.ts");
+const { scanTokenFiles } = await import("../lib/token-scan.ts");
+const { createHostTokenHistory } = await import("../lib/host-token-history.ts");
+const { machineTokensSchema } = await import("../host-contract.ts");
 
 async function homeForTest() {
   const home = await mkdtemp(join(process.cwd(), ".test-token-home-"));
@@ -28,7 +31,12 @@ async function homeForTest() {
     MUSE_HOME: join(home, "muse"),
     XDG_DATA_HOME: join(home, ".local", "share"),
   });
-  return { home, cleanup: async () => { process.env = saved; await rm(home, { recursive: true, force: true }); } };
+  assert.equal(homedir(), home);
+  return { home, cleanup: async () => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+    await rm(home, { recursive: true, force: true });
+  } };
 }
 
 function fakeHost({ hosts = [], call = async () => { throw new Error("unexpected host read"); }, listThreads = async () => [] } = {}) {
@@ -81,6 +89,138 @@ test("later host history wins over an earlier completed local force scan", async
   } finally {
     release();
     await harness.lifecycle.dispose();
+    t.mock.timers.reset();
+    await cleanup();
+  }
+});
+
+test("Cursor WAL cache hits retain observation age across window changes and host restarts", async (t) => {
+  const { home, cleanup } = await homeForTest();
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const directory = join(home, ".cursor", "acp-sessions", "session");
+  const dataDir = join(home, "host-data");
+  await mkdir(directory, { recursive: true });
+  await mkdir(dataDir);
+  const path = join(directory, "store.db");
+  const Database = (await import("better-sqlite3")).default;
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  db.pragma("wal_autocheckpoint = 0");
+  db.exec("create table blobs (id text primary key, data blob)");
+  db.prepare("insert into blobs values (?, ?)").run("user", Buffer.from(JSON.stringify({
+    role: "user", content: "hi", providerOptions: { cursor: { requestId: "request" } },
+  })));
+  db.prepare("insert into blobs values (?, ?)").run("assistant", Buffer.from(JSON.stringify({
+    role: "assistant", content: "x".repeat(360),
+  })));
+  db.pragma("wal_checkpoint(TRUNCATE)");
+  const fingerprint = await stat(path);
+  const hosts = [{ id: "host", name: "Host", status: "disconnected" }];
+  const history = createHostTokenHistory({ dataDir, computer: hostname() });
+  const { bb, harness } = fakeHost({
+    hosts,
+    call: async ({ method }) => {
+      assert.equal(method, "tokenHistory");
+      return history.read({ force: true });
+    },
+  });
+  try {
+    await plugin(bb);
+    const first = await harness.behavior.callRpc("getTokens", { days: 30, force: true });
+    const oldTokens = first.providers.find((row) => row.id === "cursor").tokens;
+    t.mock.timers.tick(1_000);
+    db.prepare("update blobs set data = ? where id = 'assistant'").run(Buffer.from(JSON.stringify({
+      role: "assistant", content: "x".repeat(432),
+    })));
+    const unchanged = await stat(path);
+    assert.equal(unchanged.mtimeMs, fingerprint.mtimeMs);
+    assert.equal(unchanged.size, fingerprint.size);
+    const fresh = await history.read({ force: true });
+    assert.equal(machineTokensSchema.safeParse(fresh).success, true);
+    const newTokens = Object.values(fresh.slices.find((row) => row.provider === "cursor").daily)
+      .reduce((sum, row) => sum + row.tokens, 0);
+    assert.ok(newTokens > oldTokens);
+    hosts[0].status = "connected";
+    t.mock.timers.tick(1_000);
+    const combined = await harness.behavior.callRpc("getTokens", { days: 30, force: true });
+    assert.equal(combined.providers.find((row) => row.id === "cursor").tokens, newTokens);
+    t.mock.timers.tick(1_000);
+    const window = await harness.behavior.callRpc("getTokens", { days: 90, force: false });
+    assert.equal(window.providers.find((row) => row.id === "cursor").tokens, newTokens);
+    const cached = await history.read({ force: true });
+    assert.equal(cached.scannedAt, fresh.scannedAt);
+    assert.deepEqual(cached.slices, fresh.slices);
+    assert.equal(machineTokensSchema.safeParse(cached).success, true);
+    const olderAnswer = structuredClone(fresh);
+    olderAnswer.scannedAt = new Date(now).toISOString();
+    for (const bucket of Object.values(olderAnswer.slices.find((row) => row.provider === "cursor").daily)) {
+      bucket.tokens = oldTokens;
+      bucket.output = oldTokens - bucket.input;
+    }
+    await writeFile(join(dataDir, "token-last.json"), JSON.stringify(olderAnswer));
+    const interrupted = await createHostTokenHistory({ dataDir, computer: hostname() }).read({});
+    assert.equal(interrupted.scannedAt, olderAnswer.scannedAt);
+    assert.deepEqual(interrupted.slices, olderAnswer.slices);
+    t.mock.timers.tick(5 * 60_000);
+    const restarted = createHostTokenHistory({ dataDir, computer: hostname() });
+    const retained = await restarted.read({ force: true });
+    assert.equal(retained.scannedAt, fresh.scannedAt);
+    assert.deepEqual(retained.slices, fresh.slices);
+    const cachePath = join(dataDir, "token-cache.json");
+    const rows = JSON.parse(await readFile(cachePath, "utf8"));
+    for (const [, row] of rows) delete row.observedAt;
+    await writeFile(cachePath, JSON.stringify(rows));
+    const legacy = await createHostTokenHistory({ dataDir, computer: hostname() }).read({});
+    assert.equal(legacy.scannedAt, "1970-01-01T00:00:00.000Z");
+    assert.deepEqual(legacy.slices, fresh.slices);
+  } finally {
+    await harness.lifecycle.dispose();
+    db.close();
+    t.mock.timers.reset();
+    await cleanup();
+  }
+});
+
+test("JSONL and database cache hits retain their original observation times", async (t) => {
+  const { home, cleanup } = await homeForTest();
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const sessions = join(home, "codex", "sessions");
+  const directory = join(home, ".local", "share", "opencode");
+  await mkdir(sessions, { recursive: true });
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(sessions, "usage.jsonl"), `${JSON.stringify({
+    type: "event_msg", timestamp: new Date(now).toISOString(),
+    payload: { type: "token_count", info: { total_token_usage: { input_tokens: 100, total_tokens: 100 } } },
+  })}\n`);
+  const Database = (await import("better-sqlite3")).default;
+  const db = new Database(join(directory, "opencode.db"));
+  db.exec("create table message (time_created integer, data text)");
+  db.prepare("insert into message values (?, ?)").run(now, JSON.stringify({ tokens: { total: 200, input: 200 } }));
+  db.close();
+  try {
+    const first = await scanTokenFiles();
+    assert.equal(first.files.length, 2);
+    for (const file of first.files) {
+      assert.equal(file.observedAt, new Date(now).toISOString());
+      assert.equal(file.retained, false);
+    }
+    const cache = new Map(first.files.map((file) => [file.path, file]));
+    t.mock.timers.tick(60_000);
+    const second = await scanTokenFiles({ cached: cache });
+    assert.deepEqual(second.daily, first.daily);
+    for (const file of second.files) {
+      assert.equal(file.observedAt, new Date(now).toISOString());
+      assert.equal(file.retained, true);
+    }
+    const legacyCache = new Map(first.files.map(({ observedAt, ...file }) => [file.path, file]));
+    const legacy = await scanTokenFiles({ cached: legacyCache });
+    for (const file of legacy.files) {
+      assert.equal(file.observedAt, "1970-01-01T00:00:00.000Z");
+      assert.equal(file.retained, true);
+    }
+  } finally {
     t.mock.timers.reset();
     await cleanup();
   }

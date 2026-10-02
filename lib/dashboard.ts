@@ -461,8 +461,7 @@ export function assembleDashboard(input: {
 export function formatDashboardText(snapshot: DashboardSnapshot): string {
   const host =
     snapshot.hosts.find((row) => row.id === snapshot.hostId)?.name ??
-    snapshot.hosts[0]?.name ??
-    "Primary machine";
+    (snapshot.hostId === null ? "Primary machine" : "Selected machine");
 
   const lines = [
     `Usage · ${host}`,

@@ -330,21 +330,25 @@ export function PiUsageSeriesChart({
           </text>
         ) : null}
 
-        <text
-          x={PAD.left}
-          y={CHART_HEIGHT - 6}
-          className="fill-muted-foreground text-[10px]"
-        >
-          {series.points[0]?.label ?? ""}
-        </text>
-        <text
-          x={PAD.left + innerW}
-          y={CHART_HEIGHT - 6}
-          textAnchor="end"
-          className="fill-muted-foreground text-[10px]"
-        >
-          {series.points.length > 1 ? (series.points.at(-1)?.label ?? "") : ""}
-        </text>
+        {bars.length > 0 ? (
+          <text
+            x={bars[0]!.x}
+            y={CHART_HEIGHT - 6}
+            className="fill-muted-foreground text-[10px]"
+          >
+            {bars[0]!.point.label}
+          </text>
+        ) : null}
+        {bars.length > 1 ? (
+          <text
+            x={bars.at(-1)!.x}
+            y={CHART_HEIGHT - 6}
+            textAnchor="end"
+            className="fill-muted-foreground text-[10px]"
+          >
+            {bars.at(-1)!.point.label}
+          </text>
+        ) : null}
       </svg>
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
         <span className="text-muted-foreground">
