@@ -39,16 +39,48 @@
  */
 import { z } from "zod";
 import {
+  PI_FOLDED_MODEL,
+  PI_FOLDED_ROW,
+  PI_GRACE_SECONDS,
+  PI_FUTURE_SKEW_SECONDS,
+  isPiSafeLink,
+  piHourInstantMs,
+  piHourRfc3339,
+  type PiIdleReadingShape,
+  type PiMoneyShape,
+} from "./pi-usage-shape";
+import {
   piDecimal,
-  piDecimalEquals,
   piDecimalFixed,
   piDecimalIsNegative,
   piDecimalIsZero,
-  type PiDecimal,
 } from "./pi-usage-decimal";
 
 /** The producer promises at most this many UTF-8 bytes per representation. */
 export const PI_MAX_SNAPSHOT_BYTES = 2_097_152;
+
+/**
+ * The producer identities, link shape, hour normalization, cadence and money
+ * questions the page needs too. They live in `pi-usage-shape.ts` so a browser
+ * bundle can read them without pulling this module's schemas in, and are
+ * re-exported here because this module is where a reader looks for them.
+ */
+export {
+  PI_FOLDED_MODEL,
+  PI_FOLDED_ROW,
+  PI_FUTURE_SKEW_SECONDS,
+  PI_GRACE_SECONDS,
+  PI_MAIN_UNASSIGNED,
+  PI_TICK_SECONDS,
+  isPiSafeLink,
+  piCostAgrees,
+  piExactCost,
+  piHourInstantMs,
+  piHourOffset,
+  piHourRfc3339,
+  piSpendIsKnown,
+  piVerifiedIdleZero,
+} from "./pi-usage-shape";
 
 /** Row and point bounds, exactly as the contract states them. */
 export const PI_MAX_TASKS = 20;
@@ -60,17 +92,6 @@ export const PI_MAX_LIVE_BINS = 90;
 export const PI_LIVE_BIN_SECONDS = 10;
 /** Task labels carry at most four approved issue/PR links. */
 export const PI_MAX_TASK_URLS = 4;
-
-/**
- * The folded row is `others` for tasks and work items but `other` for
- * requested models. Those are the producer's literal spellings, and they are
- * aggregates — never a real task key and never a fake bb thread.
- */
-export const PI_FOLDED_ROW = "others";
-export const PI_FOLDED_MODEL = "other";
-
-/** Main work with no proved task binding keeps this reserved key. */
-export const PI_MAIN_UNASSIGNED = "main_unassigned";
 
 /** Roles are a fixed closed set; an absent role is `unknown`, never invented. */
 export const PI_ROLES = ["main", "supervisor", "author", "nm", "unknown"] as const;
@@ -95,22 +116,8 @@ const MAX_QUARANTINE = 200;
 /** No bound is stated for declared sources; this keeps the array finite. */
 const MAX_SOURCES = 512;
 
-/** The only links allowed anywhere in a snapshot. */
-const SAFE_LINK =
-  /^https:\/\/github\.com\/[A-Za-z0-9._-]{1,64}\/[A-Za-z0-9._-]{1,100}\/(?:issues|pull)\/[1-9]\d{0,9}$/;
-
-export function isPiSafeLink(value: string): boolean {
-  return SAFE_LINK.test(value);
-}
-
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/;
 const DAY_ID = /^\d{4}-\d{2}-\d{2}$/;
-/**
- * An hour identity is offset-bearing and hour-precision — `2026-10-01T22+00:00`
- * — not a full-second RFC3339 instant. The offset is part of the identity: on a
- * 25-hour DST day the repeated local hour stays two distinct points.
- */
-const HOUR_ID = /^(\d{4}-\d{2}-\d{2})T(\d{2})(Z|[+-]\d{2}:\d{2})$/;
 
 function instantMs(value: string): number | null {
   if (!INSTANT.test(value)) return null;
@@ -122,30 +129,6 @@ function dayMs(value: string): number | null {
   if (!DAY_ID.test(value)) return null;
   const ms = Date.parse(`${value}T00:00:00Z`);
   return Number.isFinite(ms) ? ms : null;
-}
-
-/** The UTC instant an hour identity starts at, or `null` if it is malformed. */
-export function piHourInstantMs(hour: string): number | null {
-  const parts = HOUR_ID.exec(hour);
-  if (!parts) return null;
-  const ms = Date.parse(piHourRfc3339(hour) ?? "");
-  return Number.isFinite(ms) ? ms : null;
-}
-
-/** The offset an hour identity carries: `Z` or `+hh:mm`. */
-export function piHourOffset(hour: string): string | null {
-  return HOUR_ID.exec(hour)?.[3] ?? null;
-}
-
-/**
- * The same hour spelled with the minutes and seconds a JS date parser wants.
- * Chart code normalizes explicitly through here instead of hoping that
- * `new Date("2026-10-01T22+00:00")` means what it looks like.
- */
-export function piHourRfc3339(hour: string): string | null {
-  const parts = HOUR_ID.exec(hour);
-  if (!parts) return null;
-  return `${parts[1]}T${parts[2]}:00:00${parts[3]}`;
 }
 
 const countSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
@@ -820,16 +803,6 @@ export function parsePiStatusSidecar(text: string | null): PiSidecarRead {
 
 /* ------------------------------------------------------------------ reading */
 
-/**
- * Expected live cadence once a snapshot is actually placed and polling is
- * approved. Both are declared here so freshness has a stated meaning; this
- * task installs no timer and enables no polling.
- */
-export const PI_TICK_SECONDS = 30;
-export const PI_GRACE_SECONDS = 90;
-/** Clocks disagree by a little; beyond this a timestamp is ahead, not fresh. */
-export const PI_FUTURE_SKEW_SECONDS = 5;
-
 export type PiFreshness =
   | { state: "fresh"; ageSeconds: number }
   | { state: "stale"; ageSeconds: number }
@@ -1137,60 +1110,6 @@ export function readPiUsage(input: PiReadInput): PiReading {
   });
 }
 
-/* ------------------------------------------------------------------- idle/0 */
-
-/**
- * Whether a reading really means "Pi did no work", as opposed to any of the
- * ways a panel can fail to find out. Only a fresh, non-degraded snapshot whose
- * every declared source the producer itself verified as idle qualifies; a
- * missing file, a refused file, a failure note, a stale export, an unreadable
- * path or a partial coverage never does.
- */
-export function piVerifiedIdleZero(reading: PiReading): boolean {
-  if (reading.status !== "ok" || reading.data === null) return false;
-  if (reading.data.degraded || reading.data.retained) return false;
-  const { coverage, cost } = reading.data.snapshot;
-  return (
-    coverage.status === "verified_idle_zero" &&
-    coverage.declared_sources > 0 &&
-    coverage.verified_idle_zero === coverage.declared_sources &&
-    coverage.unreadable === 0 &&
-    coverage.unreadable_paths === 0 &&
-    coverage.never_ingested === 0 &&
-    coverage.partial === 0 &&
-    coverage.conflicting_binding === 0 &&
-    coverage.ambiguous_fork_entries === 0 &&
-    // A token field gap, a skipped row or a response without usage all mean
-    // something was not read, which is the opposite of a verified idle hour.
-    coverage.token_field_gaps === 0 &&
-    coverage.assistant_without_usage === 0 &&
-    coverage.invalid_rows === 0 &&
-    cost.calls === 0
-  );
-}
-
-/**
- * Whether known spend is actually known.
- *
- * A sum of zero with no priced call is unknown spend, not a free hour, and the
- * panel must not round it into "$0.00 spent".
- */
-export function piSpendIsKnown(amount: PiMoney): boolean {
-  return amount.priced_calls > 0;
-}
-
-/** The exact recorded sum, as digits rather than a float. */
-export function piExactCost(amount: PiMoney): PiDecimal {
-  return piDecimal(amount.known_cost_usd_exact) ?? { units: 0n, scale: 0 };
-}
-
-/** Whether the producer's rounded figure agrees with its exact companion. */
-export function piCostAgrees(amount: PiMoney): boolean {
-  const exact = piDecimal(amount.known_cost_usd_exact);
-  const rounded = piDecimal(amount.known_cost_usd);
-  return exact !== null && rounded !== null && piDecimalEquals(exact, rounded);
-}
-
 /* ------------------------------------------------------- the reading on wire */
 
 /**
@@ -1243,4 +1162,13 @@ export type PiReadingWire = z.infer<typeof piReadingSchema>;
  */
 type PiAssignable<Target, Source extends Target> = [Target, Source];
 type _PiWireIsReading = PiAssignable<PiReading, PiReadingWire>;
+/**
+ * The schema-free helpers take structural shapes, because they may not import
+ * these schemas. These two assertions are what keeps "structural" honest: if
+ * the snapshot's money block or a reading ever stopped satisfying the shape a
+ * helper reads, tsc would say so here rather than the page quietly calling a
+ * helper that no longer sees the fields it checks.
+ */
+type _PiMoneyIsShape = PiAssignable<PiMoneyShape, PiMoney>;
+type _PiReadingIsIdleShape = PiAssignable<PiIdleReadingShape, PiReading>;
 type _PiReadingIsWire = PiAssignable<PiReadingWire, PiReading>;

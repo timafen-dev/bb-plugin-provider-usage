@@ -55,6 +55,14 @@ nothing is counted twice.
 **Multi-machine.** If you have more than one host paired, a machine picker
 switches the whole view between them.
 
+**Source selector.** A *BB-native / Firstmate Pi* control at the top of the page
+chooses which dataset you are looking at. Native is everything above and is
+unchanged by its presence; Pi is one external producer's recorded task usage,
+read as its own dataset and never folded into a native total or a plan's
+remaining quota. See [Firstmate Pi, as a separate
+source](#firstmate-pi-as-a-separate-source) — it is implementation-ready, not
+live.
+
 It also contributes a homepage section and a sidebar accessory, so the tightest
 window follows you around without opening the panel.
 
@@ -291,6 +299,63 @@ Native RPCs are untouched: `getDashboard`, `getTokens`, `getThroughput` and the
 free-tokens read return exactly what they did before, and no Pi figure enters any
 of them.
 
+### What the lens shows on the page
+
+The Usage page carries a **source selector**: *BB-native* or *Firstmate Pi*. It
+picks a dataset, not a filter. On *BB-native* the page is exactly what it always
+was — live throughput, the token chart, free tokens and the per-machine
+subscription panes, polling as before. On *Firstmate Pi* those sections unmount,
+their polls stop, and one Pi section takes their place. Nothing is merged in
+either direction, and the subscriptions view stays the single native section it
+has always been: remaining quota and reset windows are account-wide facts and
+are never attributed to a Pi task.
+
+The Pi section leads with its state, because a figure is only worth as much as
+the reading behind it. The badge reads as good only for a first-hand, in-cadence
+export whose window the producer reports as fully covered; a stale or
+future-stamped export, a retained last-known figure, a producer failure, a
+partial window or a quarantined record all read as degraded instead, each with
+its own wording. Age comes from the export's own `generated_at` — never a file
+time, never the time the page asked — and the observation lag and
+completed-response basis are shown beside it, because these are recorded
+responses, not a live stream.
+
+Below that are the figures, as the producer reports them:
+
+- **Tasks**, with the author and No-Mistakes work on a task already combined,
+  the producer's own task key as the label, its title when there is one, and up
+  to four approved GitHub issue or pull-request links. No bb thread, event or
+  provider identity is invented for Pi work, because it has none.
+- **Work items** (`task · role`), **roles** and **requested models**. These are
+  the same calls sliced four ways — overlapping views of one membership, not
+  four amounts to add up. A `others` row (`other` for models) is a fold of the
+  rows past the producer's limit, not a task. **MAIN, unassigned** keeps its own
+  block: MAIN work the producer could not bind to a task stays unassigned.
+- **Recorded USD** per row and for the dataset, labelled as Pi's own
+  API-equivalent estimate, with how many calls were priced, how many are missing
+  a price and how many carried an unusable cost. A sum of zero with no priced
+  call shows as `—` and reads *unknown spend*; a priced call that genuinely cost
+  nothing shows as `$0.00`. Rounding happens only on the way to the screen, to
+  cents where cents can show the amount and to the producer's six places when
+  they cannot.
+- **Tokens**, as four separate numbers plus reasoning. Reasoning is a possible
+  subset of output and is never added into the total. The current context is
+  shown as unknown, because the producer does not record it and a cache read is
+  not the context.
+- **A chart** over the producer's own series — 10-second live bins, hours, or
+  days. Points are placed by time rather than by row index, so a stretch the
+  producer recorded nothing in stays visibly empty: an absent bin means no
+  recorded completed response, which is not the same as a source the producer
+  verified as idle. Hour identities keep the offset they were recorded with, so
+  the two repeated local hours of a 25-hour day stay two distinct points.
+- **Coverage**: declared sources with their per-source status, and the counters
+  for everything that was not read — unreadable locations, never-ingested
+  sources, conflicting bindings, ambiguous forks, token-field gaps, responses
+  without usage, skipped rows and quarantined records.
+
+Each poll replaces the previous reading outright, so leaving the lens open does
+not accumulate anything, and the poll stops when the section is unmounted.
+
 ### Activation is a separate, approved step
 
 This is **implementation-ready, not installed and not live**. Reading a snapshot
@@ -302,7 +367,12 @@ installed by the adapter: it reads one fixed, confined location on one
 explicitly approved owning machine, and an unknown or unreachable owning machine
 is reported as unavailable rather than falling back to native data or to zero.
 When polling is eventually enabled, the expected cadence is a 30-second tick
-with a 90-second grace.
+with a 90-second grace; that is also the cadence the page's Pi section asks at
+while it is open, which is the only timer any of this installs.
+
+Until the snapshot location is approved and populated, selecting the Pi lens on
+a machine without it is honest about exactly that: it reports the owning machine
+as unavailable or the snapshot as not placed, and shows no figures — not a zero.
 
 ## Develop
 
