@@ -1,0 +1,441 @@
+{
+  "consumer": {
+    "quota": "subscription remaining and reset come from the Provider Usage subscriptions view, which is not Pi task attribution",
+    "usage": "read-only display data for one producer; not a stream to bill again"
+  },
+  "cost": {
+    "calls": 3,
+    "currency": "USD",
+    "invalid_cost_calls": 0,
+    "known_cost_usd": "0.020000",
+    "known_cost_usd_exact": "0.02",
+    "label": "API-equivalent estimate recorded by Pi for the request; not an invoice, a payment, or subscription quota consumption",
+    "missing_cost_calls": 2,
+    "price_catalog_version": null,
+    "priced_calls": 1,
+    "provenance": "pi_recorded_usage_cost",
+    "repricing": "none",
+    "token_field_gaps": 1
+  },
+  "coverage": {
+    "ambiguous_fork_entries": 0,
+    "assistant_without_usage": 0,
+    "conflicting_binding": 0,
+    "declared_sources": 3,
+    "invalid_rows": 0,
+    "never_ingested": 0,
+    "partial": 0,
+    "pending_tails": 0,
+    "readable": 3,
+    "sources": [
+      {
+        "alias": "S01",
+        "entries_in_window": 1,
+        "last_ingest": "2026-10-02T13:05:01.863249Z",
+        "status": "readable"
+      },
+      {
+        "alias": "S02",
+        "entries_in_window": 1,
+        "last_ingest": "2026-10-02T13:05:01.863325Z",
+        "status": "readable"
+      },
+      {
+        "alias": "S03",
+        "entries_in_window": 1,
+        "last_ingest": "2026-10-02T13:05:01.863354Z",
+        "status": "readable"
+      }
+    ],
+    "status": "partial",
+    "token_field_gaps": 1,
+    "unreadable": 0,
+    "unreadable_paths": 0,
+    "verified_idle_zero": 0
+  },
+  "days": [
+    {
+      "calls": 3,
+      "day": "2026-10-01",
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.020000",
+      "known_cost_usd_exact": "0.02",
+      "missing_cost_calls": 2,
+      "priced_calls": 1,
+      "token_field_gaps": 1,
+      "tokens": {
+        "cache_read": 2170,
+        "cache_write": 0,
+        "input": 280,
+        "output": 1080,
+        "reasoning": 520
+      }
+    }
+  ],
+  "generated_at": "2026-10-02T13:05:01.865435Z",
+  "hours": [
+    {
+      "calls": 3,
+      "hour": "2026-10-01T22+00:00",
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.020000",
+      "known_cost_usd_exact": "0.02",
+      "missing_cost_calls": 2,
+      "priced_calls": 1,
+      "token_field_gaps": 1,
+      "tokens": {
+        "cache_read": 2170,
+        "cache_write": 0,
+        "input": 280,
+        "output": 1080,
+        "reasoning": 520
+      }
+    }
+  ],
+  "kind": "pi_usage_snapshot",
+  "limits": {
+    "max_days": 90,
+    "max_export_bytes": 2097152,
+    "max_hours": 168,
+    "max_live_bins": 90,
+    "max_requested_models": 16,
+    "max_tasks": 20,
+    "max_work_items": 50
+  },
+  "live_bins": {
+    "bin_seconds": 10,
+    "bins": [
+      {
+        "bin_start": "2026-10-01T22:50:00Z",
+        "calls": 1,
+        "invalid_cost_calls": 0,
+        "known_cost_usd": "0.020000",
+        "known_cost_usd_exact": "0.02",
+        "missing_cost_calls": 0,
+        "priced_calls": 1,
+        "token_field_gaps": 0,
+        "tokens": {
+          "cache_read": 100,
+          "cache_write": 0,
+          "input": 250,
+          "output": 1000,
+          "reasoning": 500
+        }
+      },
+      {
+        "bin_start": "2026-10-01T22:55:00Z",
+        "calls": 1,
+        "invalid_cost_calls": 0,
+        "known_cost_usd": "0.000000",
+        "known_cost_usd_exact": "0",
+        "missing_cost_calls": 1,
+        "priced_calls": 0,
+        "token_field_gaps": 0,
+        "tokens": {
+          "cache_read": 2000,
+          "cache_write": 0,
+          "input": 20,
+          "output": 50,
+          "reasoning": 20
+        }
+      },
+      {
+        "bin_start": "2026-10-01T22:58:00Z",
+        "calls": 1,
+        "invalid_cost_calls": 0,
+        "known_cost_usd": "0.000000",
+        "known_cost_usd_exact": "0",
+        "missing_cost_calls": 1,
+        "priced_calls": 0,
+        "token_field_gaps": 1,
+        "tokens": {
+          "cache_read": 70,
+          "cache_write": 0,
+          "input": 10,
+          "output": 30,
+          "reasoning": 0
+        }
+      }
+    ],
+    "covers": "2026-10-01T22:45:00Z..2026-10-01T23:00:00Z"
+  },
+  "main_unassigned": {
+    "calls": 1,
+    "invalid_cost_calls": 0,
+    "known_cost_usd": "0.000000",
+    "known_cost_usd_exact": "0",
+    "missing_cost_calls": 1,
+    "priced_calls": 0,
+    "token_field_gaps": 1,
+    "tokens": {
+      "cache_read": 70,
+      "cache_write": 0,
+      "input": 10,
+      "output": 30,
+      "reasoning": 0
+    }
+  },
+  "observation": {
+    "basis": "completed_assistant_responses",
+    "current_context_status": "unknown_no_recorded_proof",
+    "current_context_tokens": null,
+    "finality": "late retained records revise the affected hour and day on the next run",
+    "lag_seconds": 50821.865435,
+    "latest_recorded_at": "2026-10-01T22:58:00Z"
+  },
+  "producer": {
+    "alias": "firstmate-pi",
+    "ledger_schema_version": 2,
+    "parser_version": "pi-usage-parser/2",
+    "revision": "b8770582bd78ed5d362750950f93756eec105c99",
+    "source_schema_version": "pi-session-jsonl/1"
+  },
+  "quarantine": [],
+  "requested_models": [
+    {
+      "calls": 1,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.020000",
+      "known_cost_usd_exact": "0.02",
+      "missing_cost_calls": 0,
+      "priced_calls": 1,
+      "requested_model": "claude-opus-5",
+      "token_field_gaps": 0,
+      "tokens": {
+        "cache_read": 100,
+        "cache_write": 0,
+        "input": 250,
+        "output": 1000,
+        "reasoning": 500
+      }
+    },
+    {
+      "calls": 2,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.000000",
+      "known_cost_usd_exact": "0",
+      "missing_cost_calls": 2,
+      "priced_calls": 0,
+      "requested_model": "gpt-6.1-sol",
+      "token_field_gaps": 1,
+      "tokens": {
+        "cache_read": 2070,
+        "cache_write": 0,
+        "input": 30,
+        "output": 80,
+        "reasoning": 20
+      }
+    }
+  ],
+  "roles": [
+    {
+      "calls": 1,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.000000",
+      "known_cost_usd_exact": "0",
+      "missing_cost_calls": 1,
+      "priced_calls": 0,
+      "role": "main",
+      "token_field_gaps": 1,
+      "tokens": {
+        "cache_read": 70,
+        "cache_write": 0,
+        "input": 10,
+        "output": 30,
+        "reasoning": 0
+      }
+    },
+    {
+      "calls": 0,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.000000",
+      "known_cost_usd_exact": "0",
+      "missing_cost_calls": 0,
+      "priced_calls": 0,
+      "role": "supervisor",
+      "token_field_gaps": 0,
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 0,
+        "output": 0,
+        "reasoning": 0
+      }
+    },
+    {
+      "calls": 1,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.020000",
+      "known_cost_usd_exact": "0.02",
+      "missing_cost_calls": 0,
+      "priced_calls": 1,
+      "role": "author",
+      "token_field_gaps": 0,
+      "tokens": {
+        "cache_read": 100,
+        "cache_write": 0,
+        "input": 250,
+        "output": 1000,
+        "reasoning": 500
+      }
+    },
+    {
+      "calls": 1,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.000000",
+      "known_cost_usd_exact": "0",
+      "missing_cost_calls": 1,
+      "priced_calls": 0,
+      "role": "nm",
+      "token_field_gaps": 0,
+      "tokens": {
+        "cache_read": 2000,
+        "cache_write": 0,
+        "input": 20,
+        "output": 50,
+        "reasoning": 20
+      }
+    },
+    {
+      "calls": 0,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.000000",
+      "known_cost_usd_exact": "0",
+      "missing_cost_calls": 0,
+      "priced_calls": 0,
+      "role": "unknown",
+      "token_field_gaps": 0,
+      "tokens": {
+        "cache_read": 0,
+        "cache_write": 0,
+        "input": 0,
+        "output": 0,
+        "reasoning": 0
+      }
+    }
+  ],
+  "schema_version": 1,
+  "task_labels": [
+    {
+      "task_key": "demo-task",
+      "title": "Synthetic producer contract",
+      "urls": [
+        "https://github.com/timafen-dev/agentic-engineering/issues/496"
+      ]
+    },
+    {
+      "task_key": "main_unassigned",
+      "title": null,
+      "urls": []
+    }
+  ],
+  "tasks": [
+    {
+      "calls": 2,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.020000",
+      "known_cost_usd_exact": "0.02",
+      "missing_cost_calls": 1,
+      "priced_calls": 1,
+      "task_key": "demo-task",
+      "token_field_gaps": 0,
+      "tokens": {
+        "cache_read": 2100,
+        "cache_write": 0,
+        "input": 270,
+        "output": 1050,
+        "reasoning": 520
+      }
+    },
+    {
+      "calls": 1,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.000000",
+      "known_cost_usd_exact": "0",
+      "missing_cost_calls": 1,
+      "priced_calls": 0,
+      "task_key": "main_unassigned",
+      "token_field_gaps": 1,
+      "tokens": {
+        "cache_read": 70,
+        "cache_write": 0,
+        "input": 10,
+        "output": 30,
+        "reasoning": 0
+      }
+    }
+  ],
+  "token_semantics": {
+    "input": "non-cached input",
+    "model_identity": "requested model only; responseModel absence is unknown served model",
+    "reasoning": "separate possible subset of output, never added to output twice"
+  },
+  "tokens": {
+    "cache_read": 2170,
+    "cache_write": 0,
+    "input": 280,
+    "output": 1080,
+    "reasoning": 520
+  },
+  "warnings": [],
+  "window": {
+    "boundary": "[start,end)",
+    "end": "2026-10-01T23:00:00Z",
+    "mode": "half_open",
+    "start": "2026-10-01T22:00:00Z",
+    "timezone": "UTC"
+  },
+  "work_items": [
+    {
+      "calls": 1,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.020000",
+      "known_cost_usd_exact": "0.02",
+      "missing_cost_calls": 0,
+      "priced_calls": 1,
+      "token_field_gaps": 0,
+      "tokens": {
+        "cache_read": 100,
+        "cache_write": 0,
+        "input": 250,
+        "output": 1000,
+        "reasoning": 500
+      },
+      "work_item": "demo-task \u00b7 author"
+    },
+    {
+      "calls": 1,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.000000",
+      "known_cost_usd_exact": "0",
+      "missing_cost_calls": 1,
+      "priced_calls": 0,
+      "token_field_gaps": 0,
+      "tokens": {
+        "cache_read": 2000,
+        "cache_write": 0,
+        "input": 20,
+        "output": 50,
+        "reasoning": 20
+      },
+      "work_item": "demo-task \u00b7 nm"
+    },
+    {
+      "calls": 1,
+      "invalid_cost_calls": 0,
+      "known_cost_usd": "0.000000",
+      "known_cost_usd_exact": "0",
+      "missing_cost_calls": 1,
+      "priced_calls": 0,
+      "token_field_gaps": 1,
+      "tokens": {
+        "cache_read": 70,
+        "cache_write": 0,
+        "input": 10,
+        "output": 30,
+        "reasoning": 0
+      },
+      "work_item": "main_unassigned \u00b7 main"
+    }
+  ]
+}

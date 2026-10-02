@@ -157,6 +157,87 @@ have a supported local store will show subscription windows but no token
 series, and some agents (Factory Droid, Hermes) keep no usable per-turn token
 record on disk at all.
 
+## Firstmate Pi, as a separate source
+
+Firstmate Pi runs agent work outside BB. None of the paths above can see it:
+there is no BB thread emitting `thread/tokenUsage/updated`, no transcript root
+that this plugin compiles in, and no provider login to ask. Rather than invent a
+thread or fold the work into a provider row, Pi is read as its **own source**,
+through one bounded, sanitized, read-only snapshot file that the Pi side writes.
+
+The producer and its wire format are not defined here. The canonical contract is
+
+<https://github.com/timafen-dev/agentic-engineering/blob/b8770582bd78ed5d362750950f93756eec105c99/tools/subscription_usage/PI_USAGE.md>
+
+and this repository pins what that document states: wire `schema_version: 1`,
+`kind: pi_usage_snapshot`, producer alias `firstmate-pi`, private ledger schema
+2, parser `pi-usage-parser/2`, source schema `pi-session-jsonl/1`. A snapshot
+that disagrees on any of those is refused rather than read loosely — including a
+ledger-1 artifact, which the producer itself refuses.
+
+### What the figures are, and are not
+
+The USD in a Pi snapshot is the **API-equivalent estimate Pi itself recorded for
+the request**. It is not an invoice, not a payment, and not subscription quota
+consumption, so none of it is added to this panel's native totals and no share
+of it is subtracted from a plan's remaining quota. Remaining quota and reset
+windows stay exactly where they are: the subscriptions view, fed by BB's own
+providers. Nothing in the Pi path touches them.
+
+Two distinctions are kept rather than flattened, because collapsing either would
+make a believable figure that is not true:
+
+- **Pi is a source harness, not a provider.** It is where the work ran, not who
+  served the tokens.
+- **A requested model is a requested identity.** When the producer did not
+  record a served model, the served model is unknown — not confirmed to be the
+  requested one.
+
+A known sum of `0` with no priced call is **unknown spend**, not a free hour.
+Known USD is carried as exact decimal digits with an exact companion; rounding
+happens only on the way to the screen, and there is no repricing from today's
+catalogue. Input, cache read, cache write and output stay four separate numbers,
+and `reasoning` is a possible *subset* of output that is never added to it
+again. The current context size is unknown — a cache read is not the context.
+
+### Nothing becomes a zero
+
+A snapshot the panel cannot read is never shown as an idle hour. Missing,
+oversized, unparseable, refused, stale, generated-in-the-future, and
+producer-reported-failed are each their own state, and only the producer may
+declare a source idle, through `verified_idle_zero`. Last-good figures may be
+displayed, but always marked degraded — never as a current reading.
+
+Freshness comes from the snapshot's own `generated_at`, never a file's
+modification time, so rewriting an old export does not make it look new. Each
+snapshot is a complete replacement dataset: polling twice yields the same
+totals, and nothing is ever accumulated or billed again. A producer failure note
+(`<artifact>.status.json`) outranks whatever artifact is on disk, because the two
+are replaced atomically but not in one transaction, so the file beside a failure
+note may be an older generation. A note the panel cannot parse still counts as a
+failure — the dangerous reading of a broken note is the reassuring one.
+
+The views — tasks, roles, requested models, work items — are **overlapping
+dimensions** over the same calls, not additional totals, and must not be summed
+together. One task key already combines its author and No Mistakes work; a
+response copied into an NM fork counts once. MAIN work with no proved binding
+stays under the reserved `main_unassigned` key rather than being attributed to a
+task. A folded `others` row is an aggregate, never a real task and never a BB
+thread.
+
+### Activation is a separate, approved step
+
+This is **implementation-ready, not installed and not live**. Reading a snapshot
+needs a source change in this repository *plus* a tested release — not a config
+toggle and not a flag. Separately from the plugin work, turning it on requires
+its own approval for where the snapshot is placed, how that location is mounted,
+and what permissions it carries. No timer, no polling, and no live wiring is
+installed by the adapter: it reads one fixed, confined location on one
+explicitly approved owning machine, and an unknown or unreachable owning machine
+is reported as unavailable rather than falling back to native data or to zero.
+When polling is eventually enabled, the expected cadence is a 30-second tick
+with a 90-second grace.
+
 ## Develop
 
 ```bash
