@@ -461,10 +461,10 @@ function TokenUsageSection() {
             ) : null}
             {data.observations?.length ? (
               <div className="space-y-1 text-xs text-muted-foreground">
-                {data.observations.map((source) => (
-                  <p key={`${source.machineId}:${source.provider}:${source.sourceId}`} title={source.sourceId}>
-                    {source.machineName} · {source.provider} · {source.sourceId} · {formatTokenCount(source.rawTokens)} raw total · observed {source.observedAt ?? "unknown"}
-                    {source.status === "stale" ? " · Last known" : ""}
+                {data.observations.map((source, index) => (
+                  <p key={`${source.machineId}:${source.provider}:${source.sourceId}:${index}`} title={source.sourceId}>
+                    {source.machineName} · {source.provider} · {source.sourceId} · {source.historicalAggregate ? `Historical overlapping observation · Last known ${formatTokenCount(source.rawTokens)}` : `${formatTokenCount(source.rawTokens)} raw total`} · observed {source.observedAt ?? "unknown"}
+                    {source.status === "stale" && !source.historicalAggregate ? " · Last known" : ""}
                     {source.unknownWindow > 0 ? ` · Last known ${formatTokenCount(source.unknownWindow)} · unknown window` : ""}
                     {source.birthMs !== null ? ` · Filesystem birth ${new Date(source.birthMs).toISOString()}` : ""}
                     {source.mtimeMs !== null ? ` · Filesystem mtime ${new Date(source.mtimeMs).toISOString()}` : ""}

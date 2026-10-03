@@ -102,3 +102,53 @@ test("native panel renders each source observation and visible unplaced raw amou
     globalThis.IS_REACT_ACT_ENVIRONMENT = saved.act;
   }
 });
+
+test("native panel preserves overlapping historical150 separately from the current120 across window changes", async () => {
+  const saved = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
+  const { assembleTokenSnapshot, dayKey } = await jiti.import(join(repo, "lib", "tokens.ts"), {});
+  const { mergeMachineTokens } = await jiti.import(join(repo, "lib", "machine-tokens.ts"), {});
+  const now = Date.now(), observedAt = new Date(now - 5000).toISOString();
+  const bucket = (tokens) => ({ tokens, input: tokens, output: 0, cached: 0, reasoning: 0, turns: 1 });
+  const sources = [
+    { id: "host", name: "Historical host", error: "Machine is offline.", tokens: { computer: "pc", scannedAt: new Date(now).toISOString(), changedFiles: 0, slices: [
+      { provider: "codex", location: "/scope", fileCount: 2, daily: { [dayKey(now)]: bucket(150) }, observedAt },
+      { provider: "codex", location: "/scope", fileCount: 2, daily: { [dayKey(now)]: bucket(140) } },
+    ] } },
+    { id: "server", name: "Current source", error: null, tokens: { computer: "pc", scannedAt: new Date(now).toISOString(), changedFiles: 0, slices: [
+      { provider: "codex", location: "/scope", sourceId: "/scope/A", fileCount: 1, daily: { [dayKey(now)]: bucket(120) }, observedAt: new Date(now).toISOString() },
+    ] } },
+  ];
+  let tree;
+  try {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    globalThis.window = { setInterval: () => 1, clearInterval: () => {} };
+    globalThis.document = { visibilityState: "visible", addEventListener: () => {}, removeEventListener: () => {} };
+    setRpcCall(async (method, input) => {
+      if (method === "getDashboard") return assembleDashboard({ limits: normalizeProviderLimits({}), hosts: [], catalog: [], hostId: null });
+      if (method !== "getTokens") return null;
+      const merged = mergeMachineTokens(sources, input.days, now);
+      return { ...assembleTokenSnapshot({ days: input.days, fileCount: merged.fileCount, changedFiles: 0, sources: merged.providers, daily: merged.daily }), observations: merged.observations };
+    });
+    await renderer.act(async () => { tree = renderer.create(React.createElement(DashboardPage)); });
+    for (const days of [7, 30, 90, 7]) {
+      const button = tree.root.findAllByType("button").find((node) => node.children.join("") === `${days}d`);
+      await renderer.act(async () => button.props.onClick());
+      const paragraphs = tree.root.findAllByType("p");
+      const text = paragraphs.map((node) => node.children.filter((child) => typeof child === "string").join("")).join("\n");
+      assert.match(text, /Historical overlapping observation · Last known 150/);
+      assert.match(text, /Historical overlapping observation · Last known 140/);
+      assert.match(text, new RegExp(`observed ${observedAt}`));
+      assert.match(text, /Last known 140 · observed unknown/);
+      assert.match(text, /reporting-window membership unknown; not included in totals/);
+      assert.doesNotMatch(text, /incomplete/);
+      const total = paragraphs.find((node) => node.children.join("") === "Total");
+      assert.equal(total.parent.findAllByType("p")[1].children.join(""), "120");
+    }
+  } finally {
+    if (tree) await renderer.act(async () => tree.unmount());
+    setRpcCall(null);
+    globalThis.window = saved.window;
+    globalThis.document = saved.document;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = saved.act;
+  }
+});

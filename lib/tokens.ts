@@ -58,6 +58,7 @@ export interface TokenSourceRow {
   tokens: number;
   unknownWindow: number;
   rawTokens: number;
+  historicalAggregate?: boolean;
   birthMs: number | null;
   mtimeMs: number | null;
   message: string | null;
@@ -253,7 +254,11 @@ export function formatTokenText(snapshot: TokenSnapshot): string {
     lines.push("", "By source");
     for (const source of snapshot.observations) {
       lines.push(`  ${source.machineName} · ${providerDisplayName(source.provider)} · ${source.sourceId}`);
-      lines.push(`    ${formatTokenCount(source.tokens)} in window · ${formatTokenCount(source.rawTokens)} raw total · observed ${source.observedAt ?? "unknown"}${source.status === "stale" ? " · Last known" : ""}`);
+      if (source.historicalAggregate) {
+        lines.push(`    Historical overlapping observation · Last known ${formatTokenCount(source.rawTokens)} · observed ${source.observedAt ?? "unknown"}`);
+      } else {
+        lines.push(`    ${formatTokenCount(source.tokens)} in window · ${formatTokenCount(source.rawTokens)} raw total · observed ${source.observedAt ?? "unknown"}${source.status === "stale" ? " · Last known" : ""}`);
+      }
       if (source.unknownWindow > 0) lines.push(`    Last known ${formatTokenCount(source.unknownWindow)} · unknown window`);
       if (source.birthMs !== null) lines.push(`    Filesystem birth ${new Date(source.birthMs).toISOString()}`);
       if (source.mtimeMs !== null) lines.push(`    Filesystem mtime ${new Date(source.mtimeMs).toISOString()}`);

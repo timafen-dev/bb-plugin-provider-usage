@@ -204,7 +204,7 @@ const tokenSnapshotSchema = z.object({
   observations: z.array(z.object({
     machineId: z.string(), machineName: z.string(), provider: z.string(),
     sourceId: z.string(), observedAt: z.string().nullable(), status: z.enum(["ok", "stale"]),
-    tokens: z.number(), unknownWindow: z.number(), rawTokens: z.number(), birthMs: z.number().nullable(), mtimeMs: z.number().nullable(), message: z.string().nullable(),
+    tokens: z.number(), unknownWindow: z.number(), rawTokens: z.number(), historicalAggregate: z.boolean().optional(), birthMs: z.number().nullable(), mtimeMs: z.number().nullable(), message: z.string().nullable(),
   })).optional(),
   machines: z
     .array(

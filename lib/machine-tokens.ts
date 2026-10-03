@@ -87,28 +87,28 @@ export function mergeMachineTokens(
   const providers = new Set<string>();
   type Choice = { source: MachineTokenSource; slice: MachineTokenSlice; at: number };
   const groups = new Map<string, Choice[]>();
+  const historical: Choice[] = [];
   for (const source of sources) {
     if (!source.tokens) continue;
     for (const slice of source.tokens.slices) {
-      const parsed = Date.parse(slice.sourceId ? slice.observedAt ?? "" : slice.observedAt ?? source.tokens.scannedAt);
-      const at = Number.isFinite(parsed) && parsed <= nowMs ? parsed : -Infinity;
+      const parsed = Date.parse(slice.observedAt ?? "");
+      const at = Number.isFinite(parsed) && parsed > 0 && parsed <= nowMs ? parsed : -Infinity;
+      const choice = { source, slice, at };
+      if (!slice.sourceId) {
+        historical.push(choice);
+        continue;
+      }
       const key = `${source.tokens.computer}\0${slice.provider}\0${slice.location}`;
       const group = groups.get(key) ?? [];
-      group.push({ source, slice, at });
+      group.push(choice);
       groups.set(key, group);
     }
   }
   const selected: Choice[] = [];
   const newer = (a: Choice, b: Choice) => a.at > b.at || (a.at === b.at && (b.source.error || b.slice.retained) && !a.source.error && !a.slice.retained);
   for (const group of groups.values()) {
-    const legacy = group.filter((row) => !row.slice.sourceId).reduce<Choice | null>((best, row) => !best || newer(row, best) ? row : best, null);
-    const attributed = group.filter((row) => row.slice.sourceId);
-    if (legacy && (!attributed.length || attributed.every((row) => legacy.at > row.at))) {
-      selected.push(legacy);
-      continue;
-    }
     const files = new Map<string, Choice>();
-    for (const row of attributed) {
+    for (const row of group) {
       const id = row.slice.sourceId!;
       const prior = files.get(id);
       if (!prior || newer(row, prior)) files.set(id, row);
@@ -128,8 +128,22 @@ export function mergeMachineTokens(
   const keys = new Set(enumerateDays(days, nowMs));
   let fileCount = 0;
   const add = (row: Record<string, TokenBucket>, atMs: number, bucket: TokenBucket) => addBucket(row[dayKey(atMs)] ??= emptyBucket(), bucket);
-  for (const choice of selected) {
+  for (const choice of [...selected, ...historical]) {
     const { source, slice } = choice;
+    if (!slice.sourceId) {
+      let rawTokens = slice.unknownWindow?.tokens ?? 0;
+      for (const bucket of slice.events?.map((event) => event.bucket) ?? Object.values(slice.daily)) rawTokens += bucket.tokens;
+      for (const event of Object.values(slice.keyedEvents ?? {})) rawTokens += event.bucket.tokens;
+      providers.add(slice.provider);
+      observations.push({
+        machineId: source.id, machineName: source.name, provider: slice.provider,
+        sourceId: slice.location, observedAt: Number.isFinite(choice.at) ? new Date(choice.at).toISOString() : null,
+        status: "stale", tokens: 0, rawTokens, unknownWindow: 0,
+        historicalAggregate: true, birthMs: null, mtimeMs: null,
+        message: `Historical overlapping observation; reporting-window membership unknown; not included in totals.${source.error ? ` ${source.error}` : ""}`,
+      });
+      continue;
+    }
     const incompatible = slice.readError === true && slice.events === undefined;
     const amounts: Record<string, TokenBucket> = slice.events || incompatible ? {} : structuredClone(slice.daily);
     for (const event of slice.events ?? []) add(amounts, event.atMs, event.bucket);
@@ -159,8 +173,8 @@ export function mergeMachineTokens(
   const machines = sources.map((source): TokenMachineRow => ({
     id: source.id, name: source.name,
     status: !source.tokens ? "error" : source.error || source.tokens.slices.some((slice) => {
-      const at = Date.parse(slice.sourceId ? slice.observedAt ?? "" : slice.observedAt ?? source.tokens!.scannedAt);
-      return slice.retained || !Number.isFinite(at) || at > nowMs || nowMs - at >= MACHINE_TOKENS_FRESH_MS;
+      const at = Date.parse(slice.observedAt ?? "");
+      return !slice.sourceId || slice.retained || !Number.isFinite(at) || at > nowMs || nowMs - at >= MACHINE_TOKENS_FRESH_MS;
     }) ? "stale" : "ok",
     tokens: totals.get(source) ?? 0,
     message: source.error,

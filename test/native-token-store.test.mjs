@@ -69,7 +69,7 @@ test("later host history wins over an earlier completed local force scan", async
       await hostReleased;
       return {
         computer: hostname(), scannedAt: new Date().toISOString(), changedFiles: 0,
-        slices: [{ provider: "codex", location: sessions, fileCount: 1, daily: {
+        slices: [{ provider: "codex", location: sessions, sourceId: join(sessions, "usage.jsonl"), observedAt: new Date().toISOString(), fileCount: 1, daily: {
           [dayKey(now)]: { tokens: 120, input: 120, output: 0, cached: 0, reasoning: 0, turns: 1 },
         } }],
       };
@@ -303,4 +303,57 @@ test("local tokens CLI force cold-reconstructs Codex and Opencode in the current
     t.mock.timers.reset();
     await cleanup();
   }
+});
+
+test("legacy remote150 survives JSON, offline restart and CLI while local attributed120 is counted once", async () => {
+  const { home, cleanup } = await homeForTest();
+  const sessions = join(home, "codex/sessions");
+  await mkdir(sessions, { recursive: true });
+  const now = Date.now();
+  await writeFile(join(sessions, "usage.jsonl"), `${JSON.stringify({ type: "event_msg", timestamp: new Date(now).toISOString(), payload: { type: "token_count", info: { total_token_usage: { input_tokens: 120, total_tokens: 120 } } } })}\n`);
+  try {
+    for (const observedAt of [undefined, new Date(now - 5000).toISOString()]) {
+      const hosts = [{ id: "host", name: "Host", status: "connected" }];
+      const legacy = {
+        computer: hostname(), scannedAt: new Date(now).toISOString(), changedFiles: 0,
+        slices: [{ provider: "codex", location: sessions, fileCount: 2, daily: { [dayKey(now)]: { tokens: 150, input: 150, output: 0, cached: 0, reasoning: 0, turns: 2 } }, ...(observedAt === undefined ? {} : { observedAt }) }],
+      };
+      const { bb, harness } = fakeHost({ hosts, call: async ({ method }) => {
+        assert.equal(method, "tokenHistory");
+        return structuredClone(legacy);
+      } });
+      let reloaded;
+      try {
+        await plugin(bb);
+        const first = await harness.behavior.callRpc("getTokens", { days: 7, force: true });
+        assert.equal(first.totals.tokens, 120);
+        assert.equal(first.fileCount, 1);
+        assert.equal(first.observations.find((row) => row.historicalAggregate).rawTokens, 150);
+        assert.equal(first.observations.find((row) => row.historicalAggregate).observedAt, observedAt ?? null);
+        const persisted = JSON.parse(bb.storage.database().prepare("select value from token_meta where key = 'remote-machines'").get().value);
+        assert.deepEqual(persisted[0].tokens, legacy);
+        hosts[0].status = "disconnected";
+        reloaded = await harness.lifecycle.reload(plugin);
+        const result = await reloaded.harness.behavior.runCli(["tokens", "--days", "7", "--force", "--json"]);
+        assert.equal(result.exitCode, 0);
+        const current = JSON.parse(result.stdout);
+        assert.equal(current.totals.tokens, 120);
+        assert.equal(current.series.at(-1).byProvider.codex, 120);
+        assert.equal(current.fileCount, 1);
+        const historical = current.observations.find((row) => row.historicalAggregate);
+        assert.equal(historical.rawTokens, 150);
+        assert.equal(historical.observedAt, observedAt ?? null);
+        assert.match(historical.message, /membership unknown; not included in totals/);
+        const retained = JSON.parse(reloaded.bb.storage.database().prepare("select value from token_meta where key = 'remote-machines'").get().value);
+        assert.deepEqual(retained[0].tokens, legacy);
+        const text = await reloaded.harness.behavior.runCli(["tokens", "--days", "7", "--force"]);
+        assert.match(text.stdout, /Total\s+120 /);
+        assert.match(text.stdout, /Historical overlapping observation · Last known 150 · observed/);
+        assert.doesNotMatch(text.stdout, /150 in window|incomplete/);
+      } finally {
+        if (reloaded) await reloaded.harness.lifecycle.dispose();
+        await harness.lifecycle.dispose();
+      }
+    }
+  } finally { await cleanup(); }
 });

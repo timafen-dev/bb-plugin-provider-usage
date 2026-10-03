@@ -46,6 +46,8 @@ const machine = (id, computer, slices, error = null) => ({
 const slice = (provider, location, tokens) => ({
   provider,
   location,
+  sourceId: location,
+  observedAt: new Date(testNow).toISOString(),
   fileCount: 1,
   daily: { [today]: bucket(tokens) },
 });
@@ -102,6 +104,7 @@ test("newest observations win regardless of registration order", () => {
   const old = machine("offline", "pc", [slice("codex", "/a", 100)], "offline");
   const fresh = machine("connected", "pc", [slice("codex", "/a", 120)]);
   old.tokens.scannedAt = new Date(Date.now() - 300_000).toISOString();
+  old.tokens.slices[0].observedAt = old.tokens.scannedAt;
   for (const sources of [[old, fresh], [fresh, old]]) {
     const merged = mergeMachineTokens(sources, 7);
     assert.equal(merged.daily[today].codex.tokens, 120);
@@ -165,7 +168,7 @@ test("window totals ignore days outside the window", () => {
   const merged = mergeMachineTokens(
     [
       machine("one", "pc", [
-        { provider: "codex", location: "/a", fileCount: 1, daily: { [today]: bucket(5), [old]: bucket(1000) } },
+        { ...slice("codex", "/a", 5), daily: { [today]: bucket(5), [old]: bucket(1000) } },
       ]),
     ],
     30,
