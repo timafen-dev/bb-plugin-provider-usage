@@ -804,6 +804,7 @@ function statusSummary(
   status: PiReadingStatus,
   freshVerified: boolean,
   retained: boolean,
+  hasFigures: boolean,
   partialCoverage: boolean,
   ageText: string | null,
 ): string {
@@ -823,7 +824,9 @@ function statusSummary(
       : `Exported ${ageText} ago, older than the expected cadence`;
   }
   if (status === "future") return "Stamped ahead of this machine's clock";
-  return "No figures to show";
+  return hasFigures
+    ? "Degraded figures from the export, not a current observation"
+    : "No figures to show";
 }
 
 /**
@@ -915,6 +918,7 @@ export function piUsageView(reading: PiReading | null, nowMs: number): PiUsageVi
       reading.status,
       freshVerified,
       data?.retained ?? false,
+      data !== null,
       partialCoverage,
       ageText,
     ),

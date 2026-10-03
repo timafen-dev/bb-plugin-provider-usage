@@ -122,6 +122,76 @@ test("mounted reads retain figures without current or idle badges after RPC fail
   }
 });
 
+test("Read again shows degraded producer-failure figures and recovers", async () => {
+  const saved = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT, now: Date.now };
+  let tree;
+  let sidecarText = null;
+  let text = fixtureText;
+  let failedBefore = false;
+  try {
+    Date.now = () => GENERATED_MS;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    globalThis.window = { setInterval: () => 1, clearInterval: () => {} };
+    globalThis.document = {
+      visibilityState: "visible",
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    loaded.stub.setRpcCall(async () => {
+      const reading = loaded.contract.readPiUsage({ text, sidecarText, failedBefore, nowMs: GENERATED_MS });
+      if (sidecarText !== null) {
+        assert.equal(reading.status, "failed");
+        assert.equal(reading.data?.retained ?? false, false);
+      }
+      failedBefore = reading.status === "failed";
+      return reading;
+    });
+    await loaded.renderer.act(async () => {
+      tree = loaded.renderer.create(loaded.React.createElement(loaded.section.PiUsageSection));
+    });
+    const rendered = () => JSON.stringify(tree.toJSON());
+    const readAgain = async () => {
+      await loaded.renderer.act(async () => {
+        tree.root.findAllByType("button").find((button) => button.children.includes("Read again")).props.onClick();
+      });
+    };
+    const assertFigures = () => {
+      assert.match(rendered(), /3\.5k/);
+      assert.match(rendered(), /\$0\.02/);
+      assert.match(rendered(), /demo-task/);
+      assert.doesNotMatch(rendered(), /No figures to show/);
+    };
+    assertFigures();
+
+    // The backend receives a valid artifact beside a newly published failure note.
+    sidecarText = JSON.stringify({ status: "failed", error_class: "ExportError" });
+    await readAgain();
+    assertFigures();
+    assert.match(rendered(), /Producer export failed/);
+    assert.match(rendered(), /Degraded figures/);
+    assert.match(rendered(), /not current/);
+
+    sidecarText = null;
+    await readAgain();
+    assertFigures();
+    assert.match(rendered(), /export recovered/);
+    assert.doesNotMatch(rendered(), /Producer export failed|Degraded figures|not current/);
+
+    text = null;
+    sidecarText = JSON.stringify({ status: "failed", error_class: "ExportError" });
+    await readAgain();
+    assert.match(rendered(), /No figures to show/);
+    assert.doesNotMatch(rendered(), /Degraded figures|3\.5k|\$0\.02|demo-task/);
+  } finally {
+    if (tree) await loaded.renderer.act(async () => { tree.unmount(); });
+    loaded.stub.setRpcCall(null);
+    Date.now = saved.now;
+    globalThis.window = saved.window;
+    globalThis.document = saved.document;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = saved.act;
+  }
+});
+
 /** The figures as markup, for a reading of some snapshot text. */
 function renderFigures(input = {}) {
   const nowMs = input.nowMs ?? GENERATED_MS;
