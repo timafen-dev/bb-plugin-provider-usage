@@ -325,6 +325,58 @@ test("later confirmed ACP removal lets chats8500 replace offline ACP8120 across 
       assert.ok(text.includes(`Last known ${formatTokenCount(8500)} · unknown window`));
     }
   }
+  const confirmedCache = new Map(JSON.parse(await fsPromises.readFile(join(serverDir, "token-cache.json"), "utf8")));
+  const statSync = fs.statSync;
+  let code;
+  t.mock.method(fs, "statSync", (path, ...args) => {
+    if (path === acp) throw Object.assign(new Error("synthetic inconclusive ACP probe"), { code });
+    return statSync(path, ...args);
+  });
+  syncBuiltinESMExports();
+  for (code of ["EACCES", "EPERM", "EIO"]) {
+    for (const force of [false, true]) {
+      t.mock.timers.tick(180_000);
+      for (const priorFact of [current.slices[0].cursorAcpPresence, first.slices[0].cursorAcpPresence, undefined]) {
+        const cached = new Map([...confirmedCache].map(([path, entry]) => [path, { ...entry, cursorAcpPresence: priorFact }]));
+        const scan = await scanTokenFiles({ cached, force });
+        assert.equal(scan.files.length, 1);
+        assert.deepEqual(scan.files[0].cursorAcpPresence, priorFact);
+        assert.equal(scan.files[0].observedAt, current.slices[0].observedAt);
+        assert.equal(scan.files[0].unknownWindow.tokens, 8500);
+        const projected = slicesFromScan(scan)[0];
+        assert.deepEqual(projected.cursorAcpPresence, priorFact);
+        if (priorFact === undefined) assert.equal(Object.hasOwn(projected, "cursorAcpPresence"), false);
+        const paint = { files: [], daily: {}, sources: [] };
+        seedDailyFromCache(paint.daily, paint.sources, cached, "cursor", paint.files);
+        assert.deepEqual(slicesFromScan(paint)[0].cursorAcpPresence, priorFact);
+      }
+      const answer = await serverHistory.read({ force });
+      assert.deepEqual(answer.slices[0].cursorAcpPresence, current.slices[0].cursorAcpPresence);
+      assert.equal(answer.slices[0].observedAt, current.slices[0].observedAt);
+      const persisted = JSON.parse(await fsPromises.readFile(join(serverDir, "token-cache.json"), "utf8"));
+      assert.deepEqual(persisted[0][1].cursorAcpPresence, current.slices[0].cursorAcpPresence);
+      const replay = await createHostTokenHistory({ dataDir: serverDir, computer: "pc" }).read({});
+      assert.deepEqual(replay.slices, answer.slices);
+      const host = { id: "host", name: "Host", error: "Machine is offline.", tokens: offline };
+      const server = { id: "server", name: "Server", error: null, tokens: JSON.parse(JSON.stringify(replay)) };
+      for (const sources of [[host, server], [server, host]]) {
+        const result = mergeMachineTokens(sources, 7);
+        assert.equal(result.fileCount, 1);
+        assert.equal(result.observations[0].unknownWindow, 8500);
+        assert.equal(result.observations[0].machineId, "server");
+        assert.equal(result.observations[0].observedAt, current.slices[0].observedAt);
+        assert.deepEqual(result.daily, {});
+        const text = formatTokenText({ ...assembleTokenSnapshot({ days: 7, fileCount: 1, changedFiles: 0, sources: result.providers, daily: result.daily }), observations: result.observations });
+        assert.ok(text.includes(`Last known ${formatTokenCount(8500)} · unknown window`));
+      }
+    }
+  }
+  t.mock.restoreAll();
+  syncBuiltinESMExports();
+  const conclusive = await scanTokenFiles({ cached: confirmedCache });
+  assert.deepEqual(conclusive.files[0].cursorAcpPresence, { present: false, observedAt: new Date().toISOString() });
+  assert.notEqual(conclusive.files[0].cursorAcpPresence.observedAt, current.slices[0].cursorAcpPresence.observedAt);
+  assert.equal(conclusive.files[0].observedAt, current.slices[0].observedAt);
 });
 
 test("recreated ACP presence supersedes older removal without refreshing its unchanged amount", async (t) => {

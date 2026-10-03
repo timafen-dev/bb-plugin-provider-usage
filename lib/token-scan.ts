@@ -594,7 +594,7 @@ export async function scanTokenFiles(options?: {
       }
       const unknownWindow = emptyBucket();
       for (const bucket of Object.values(file.daily)) addBucket(unknownWindow, bucket);
-      files.push({ ...observedFile({ ...file, unknownWindow }, prior), provider: "cursor", daily: {}, unknownWindow, cursorAcpPresence: observeCursorAcp(file.path) });
+      files.push({ ...observedFile({ ...file, unknownWindow }, prior), provider: "cursor", daily: {}, unknownWindow, cursorAcpPresence: observeCursorAcp(file.path) ?? prior?.cursorAcpPresence });
     }
   }
 
