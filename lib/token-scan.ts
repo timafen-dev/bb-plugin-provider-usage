@@ -411,11 +411,18 @@ export function unplaceCursor(file: FileScanResult): void {
 
 function retainedFile(path: string, prior: FileCacheEntry, provider: string, nowMs: number, failed = true): FileScanResult | null {
   let info;
-  try { info = statSync(path); } catch { info = null; }
+  let removed = false;
+  try { info = statSync(path); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    removed = code === "ENOENT" || code === "ENOTDIR";
+    if (!removed) failed = true;
+  }
+  const cutoff = nowMs - NINETY_DAYS_MS;
   if (provider === "opencode") {
-    if (prior.events && !prior.events.some((event) => event.atMs >= nowMs - NINETY_DAYS_MS)) return null;
-  } else if (info && info.mtimeMs < nowMs - NINETY_DAYS_MS) return null;
-  const removed = info === null;
+    if (prior.events && !prior.events.some((event) => event.atMs >= cutoff)) return null;
+  } else if (provider === "cursor") {
+    if (info && Math.round(info.mtimeMs) < cutoff && Math.round(Number.isFinite(info.birthtimeMs) ? info.birthtimeMs : info.mtimeMs) < cutoff) return null;
+  } else if (info && info.mtimeMs < cutoff) return null;
   const unknownWindow = { ...(prior.unknownWindow ?? emptyBucket()) };
   if (removed && !prior.events) for (const bucket of Object.values(prior.daily)) addBucket(unknownWindow, bucket);
   return { ...prior, path, provider, daily: removed && !prior.events ? {} : prior.daily, unknownWindow, retained: true, readError: !removed && (failed || prior.readError === true) };
