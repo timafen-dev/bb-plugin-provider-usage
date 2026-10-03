@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import test from "node:test";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 registerHooks({
@@ -131,7 +130,7 @@ test("overlapping opencode database sets count each database once", () => {
 test("retained database slices preserve their observations across cached paints", () => {
   const path = "/home/u/.local/share/opencode/opencode.db";
   const old = new Date(testNow - 300_000).toISOString();
-  const cache = new Map([[path, { daily: { [today]: bucket(100) }, observedAt: old }]]);
+  const cache = new Map([[path, { daily: { [today]: bucket(100) }, events: [{ atMs: testNow, bucket: bucket(100) }], observedAt: old }]]);
   const scan = { files: [], sources: [], daily: {} };
   seedDailyFromCache(scan.daily, scan.sources, cache, "opencode", scan.files);
   const local = machine("server", "pc", slicesFromScan(scan));
@@ -155,7 +154,8 @@ test("cached paint retains missing databases alongside successfully scanned data
   assert.equal(seedDailyFromCache(scan.daily, scan.sources, cache, "opencode", scan.files), 1);
   assert.equal(seedDailyFromCache(scan.daily, scan.sources, cache, "opencode", scan.files), 0);
   const merged = mergeMachineTokens([machine("server", "pc", slicesFromScan(scan))], 7, testNow);
-  assert.equal(merged.daily[today].opencode.tokens, 12);
+  assert.equal(merged.daily[today].opencode.tokens, 5);
+  assert.equal(merged.observations.reduce((sum, row) => sum + row.unknownWindow, 0), 7);
   assert.equal(merged.fileCount, 2);
   assert.equal(merged.machines[0].status, "stale");
 });
@@ -179,8 +179,8 @@ test("slices are keyed by where each provider's files live", () => {
   const slices = slicesFromScan(
     {
       files: [
-        { path: "/acc/2/codex/sessions/a.jsonl", mtimeMs: 1, size: 1, daily: {} },
-        { path: "/nowhere-home/.claude/projects/p/b.jsonl", mtimeMs: 1, size: 1, daily: {} },
+        { path: "/acc/2/codex/sessions/a.jsonl", mtimeMs: 1, size: 1, daily: { [today]: bucket(3) } },
+        { path: "/nowhere-home/.claude/projects/p/b.jsonl", mtimeMs: 1, size: 1, daily: { [today]: bucket(4) } },
       ],
       daily: { [today]: { codex: bucket(3), "claude-code": bucket(4) } },
     },
@@ -195,13 +195,13 @@ test("slices are keyed by where each provider's files live", () => {
 });
 
 test("host history reuses its parse cache and answers from disk after a restart", async () => {
-  const dataDir = await mkdtemp(join(tmpdir(), "host-tokens-"));
+  const dataDir = await mkdtemp(join(process.cwd(), ".test-host-tokens-"));
   try {
     const calls = [];
     const scan = async ({ cached }) => {
       calls.push(cached.size);
       return {
-        files: [{ path: "/x/sessions/a.jsonl", mtimeMs: 1, size: 9, daily: {}, observedAt: cached.get("/x/sessions/a.jsonl")?.observedAt ?? new Date(clock).toISOString() }],
+        files: [{ path: "/x/sessions/a.jsonl", provider: "codex", mtimeMs: 1, size: 9, daily: { [today]: bucket(42) }, observedAt: cached.get("/x/sessions/a.jsonl")?.observedAt ?? new Date(clock).toISOString() }],
         changedFiles: cached.size === 0 ? 1 : 0,
         sources: ["codex"],
         daily: { [today]: { codex: bucket(42) } },
@@ -222,7 +222,8 @@ test("host history reuses its parse cache and answers from disk after a restart"
     const second = createHostTokenHistory({ dataDir, computer: "pc", scan, now: () => clock });
     clock += 5 * 60_000;
     const retained = await second.read({ force: true });
-    assert.equal(retained.scannedAt, answer.scannedAt);
+    assert.equal(retained.slices[0].observedAt, answer.slices[0].observedAt);
+    assert.equal(retained.scannedAt, new Date(clock).toISOString());
     assert.deepEqual(calls, [0, 1]);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
@@ -230,7 +231,7 @@ test("host history reuses its parse cache and answers from disk after a restart"
 });
 
 test("host history hands back the last answer while a slow scan continues", async () => {
-  const dataDir = await mkdtemp(join(tmpdir(), "host-tokens-"));
+  const dataDir = await mkdtemp(join(process.cwd(), ".test-host-tokens-"));
   try {
     let release;
     let count = 0;
@@ -238,7 +239,7 @@ test("host history hands back the last answer while a slow scan continues", asyn
       count += 1;
       if (count === 2) await new Promise((resolve) => (release = resolve));
       return {
-        files: [{ path: "/x/sessions/a.jsonl", mtimeMs: count, size: count, daily: {}, observedAt: new Date().toISOString() }],
+        files: [{ path: "/x/sessions/a.jsonl", provider: "codex", mtimeMs: count, size: count, daily: { [today]: bucket(count) }, observedAt: new Date().toISOString() }],
         changedFiles: 1,
         sources: [],
         daily: { [today]: { codex: bucket(count) } },
@@ -265,8 +266,8 @@ test("host history hands back the last answer while a slow scan continues", asyn
 });
 
 test("host history scans real transcript folders", async () => {
-  const home = await mkdtemp(join(tmpdir(), "host-home-"));
-  const dataDir = await mkdtemp(join(tmpdir(), "host-tokens-"));
+  const home = await mkdtemp(join(process.cwd(), ".test-host-home-"));
+  const dataDir = await mkdtemp(join(process.cwd(), ".test-host-tokens-"));
   const saved = { ...process.env };
   try {
     const sessions = join(home, "codex", "sessions", "2026");

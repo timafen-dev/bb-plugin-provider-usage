@@ -15,6 +15,7 @@ import {
 
 export interface CursorFileScan {
   path: string;
+  birthMs?: number;
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
@@ -28,6 +29,7 @@ export interface CursorCacheEntry {
   daily: Record<string, TokenBucket>;
   blobCount?: number;
   maxRowid?: number;
+  unknownWindow?: TokenBucket;
 }
 
 export function isCursorStorePath(path: string): boolean {
@@ -350,7 +352,8 @@ export function scanCursorStores(options?: {
     if (times.size === 0) continue;
     if (times.mtimeMs < cutoff && times.birthMs < cutoff) continue;
 
-    const prior = cached.get(path);
+    const entry = cached.get(path);
+    const prior = entry?.unknownWindow ? { ...entry, daily: { unknown: entry.unknownWindow } } : entry;
     const fingerprintStale =
       !prior ||
       prior.mtimeMs !== times.mtimeMs ||
@@ -370,10 +373,7 @@ export function scanCursorStores(options?: {
       // cache row with totals but no identity is also kept — we just stamp
       // the identity so the next pass can skip the open entirely.
       const nextIdentity = readAcpStoreIdentity(path);
-      if (
-        prior?.daily &&
-        (prior.blobCount == null || identityUnchanged(prior, nextIdentity))
-      ) {
+      if (prior?.daily && identityUnchanged(prior, nextIdentity)) {
         daily = prior.daily;
         identity = nextIdentity ?? identity;
       } else {
@@ -388,6 +388,7 @@ export function scanCursorStores(options?: {
       path,
       mtimeMs: times.mtimeMs,
       size: times.size,
+      birthMs: times.birthMs,
       daily,
       ...(identity
         ? { blobCount: identity.blobCount, maxRowid: identity.maxRowid }

@@ -13,6 +13,7 @@ export interface OpencodeFileScan {
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
+  events?: { atMs: number; bucket: TokenBucket }[];
 }
 
 const require = createRequire(import.meta.url);
@@ -153,7 +154,7 @@ export function scanOpencodeStores(options?: {
   paths?: readonly string[];
   cached?: Map<
     string,
-    { mtimeMs: number; size: number; daily: Record<string, TokenBucket> }
+    { mtimeMs: number; size: number; daily: Record<string, TokenBucket>; events?: { atMs: number; bucket: TokenBucket }[] }
   >;
 }): OpencodeFileScan[] {
   const cached = options?.cached ?? new Map();
@@ -166,17 +167,18 @@ export function scanOpencodeStores(options?: {
 
     const prior = cached.get(path);
     if (
-      prior &&
+      prior && prior.events &&
       prior.mtimeMs === fingerprint.mtimeMs &&
       prior.size === fingerprint.size
     ) {
-      files.push({ path, ...fingerprint, daily: prior.daily });
+      files.push({ path, ...fingerprint, daily: prior.daily, events: prior.events });
       continue;
     }
 
     const db = openSqlite(path);
     if (!db) continue;
     const daily: Record<string, TokenBucket> = {};
+    const events: { atMs: number; bucket: TokenBucket }[] = [];
     try {
       // Pull only the token scalars. Shipping `data` (avg ~7KB, some multi-MB)
       // into JS just to JSON.parse it is the cold-scan cost on a 1GB db.
@@ -215,14 +217,9 @@ export function scanOpencodeStores(options?: {
         if (tokens <= 0 && cached <= 0) continue;
         const key = dayKey(atMs);
         const current = daily[key] ?? emptyBucket();
-        addBucket(current, {
-          tokens,
-          input,
-          output,
-          cached,
-          reasoning,
-          turns: 1,
-        });
+        const bucket = { tokens, input, output, cached, reasoning, turns: 1 };
+        events.push({ atMs, bucket });
+        addBucket(current, bucket);
         daily[key] = current;
       }
     } catch {
@@ -231,7 +228,7 @@ export function scanOpencodeStores(options?: {
       db.close();
     }
 
-    files.push({ path, ...fingerprint, daily });
+    files.push({ path, ...fingerprint, daily, events });
   }
 
   return files;

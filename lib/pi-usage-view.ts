@@ -105,7 +105,6 @@ const MONTHS = [
  * from a locale formatter so an age reads the same in a test as on a screen.
  */
 export function piDurationText(seconds: number): string {
-  if (!Number.isFinite(seconds)) return "unknown";
   const total = Math.max(0, Math.round(seconds));
   if (total < 60) return `${total}s`;
   if (total < 3600) return `${Math.floor(total / 60)}m`;
@@ -121,17 +120,13 @@ export function piDurationText(seconds: number): string {
 
 /** `2026-10-01` as `Oct 1`, without asking a date parser or a locale. */
 export function piDayLabel(day: string): string {
-  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
-  if (!parts) return day;
-  const month = MONTHS[Number(parts[2]) - 1];
-  return month ? `${month} ${Number(parts[3])}` : day;
+  const month = MONTHS[Number(day.slice(5, 7)) - 1];
+  return `${month} ${Number(day.slice(8, 10))}`;
 }
 
 /** `2026-10-01T22:50:00Z` as `22:50:00`, read off the identity itself. */
 export function piClockLabel(instant: string): string {
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(instant)
-    ? instant.slice(11, 19)
-    : instant;
+  return instant.slice(11, 19);
 }
 
 /**
@@ -140,9 +135,8 @@ export function piClockLabel(instant: string): string {
  * repeated hours of a 25-hour DST day read as one.
  */
 export function piHourLabel(hour: string): string {
-  const rfc = piHourRfc3339(hour);
-  const offset = piHourOffset(hour);
-  if (rfc === null || offset === null) return hour;
+  const rfc = piHourRfc3339(hour)!;
+  const offset = piHourOffset(hour)!;
   const day = piDayLabel(rfc.slice(0, 10));
   return `${day} ${rfc.slice(11, 13)}:00 ${offset === "Z" ? "UTC" : offset}`;
 }
@@ -647,7 +641,7 @@ function hourSeries(snapshot: PiUsageSnapshot): PiSeriesView {
   const points = snapshot.hours.map((hour): PiPointView => {
     // The identity is offset-bearing and hour-precision, so it is normalized
     // explicitly rather than handed to a date parser as written.
-    const startMs = Date.parse(piHourRfc3339(hour.hour) ?? "");
+    const startMs = Date.parse(piHourRfc3339(hour.hour)!);
     return {
       key: hour.hour,
       label: piHourLabel(hour.hour),

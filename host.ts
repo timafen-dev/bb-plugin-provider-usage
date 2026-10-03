@@ -17,6 +17,8 @@ import {
 } from "./lib/claude-machine.js";
 import { createHostTokenHistory } from "./lib/host-token-history.js";
 import { readPiExportFacts } from "./lib/pi-usage-source.js";
+import { readCodexUsageSupplement } from "./lib/codex-usage.js";
+import type { ProviderSupplement } from "./lib/dashboard.js";
 
 let tokenHistory: ReturnType<typeof createHostTokenHistory> | null = null;
 
@@ -46,7 +48,14 @@ async function readAccountEmail(directory: string): Promise<string | null> {
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
-    claudeUsage: async (_input, context): Promise<ClaudeMachineUsage> => {
+    claudeUsage: async (input, context): Promise<ClaudeMachineUsage & { codexSupplement?: ProviderSupplement | null }> => {
+      if (input !== null) {
+        return {
+          status: "unknown" as const, accountEmail: null, planLabel: null,
+          message: null, directory: "", windows: [],
+          codexSupplement: await readCodexUsageSupplement({ expectedAccountEmail: input.codexAccountEmail }),
+        };
+      }
       const directory = claudeDirectory(process.env, homedir());
       const base = {
         directory,

@@ -727,11 +727,6 @@ export function PiUsageSection() {
           </div>
         ) : view.figures ? (
           <PiUsageFigures view={view} />
-        ) : view.verifiedIdleZero ? (
-          <p className="text-sm text-muted-foreground">
-            The producer verified every declared source as idle for this window:
-            no recorded calls.
-          </p>
         ) : (
           <p className="text-sm text-muted-foreground">
             No figures to show. This is not a zero — nothing was read.

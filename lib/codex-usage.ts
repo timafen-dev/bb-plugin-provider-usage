@@ -173,22 +173,10 @@ export function normalizeCodexRateLimits(value: unknown): ProviderSupplement | n
   return { windows, credits, spendControl, resetCredits };
 }
 
-function commandCandidates(explicit?: string): string[] {
-  const configured = explicit?.trim() || process.env.CODEX_CLI_PATH?.trim();
-  return [
-    configured,
-    "codex",
-    "/opt/homebrew/bin/codex",
-    "/usr/local/bin/codex",
-  ].filter(
-    (value, index, rows): value is string =>
-      Boolean(value) && rows.indexOf(value) === index,
-  );
-}
-
 async function readFromCommand(
   command: string,
   timeoutMs: number,
+  expectedAccountEmail: string,
 ): Promise<ProviderSupplement | null> {
   return new Promise((resolve) => {
     const child = spawn(command, ["app-server", "--stdio"], {
@@ -225,10 +213,16 @@ async function readFromCommand(
           continue;
         }
         if (message.id === 1 && message.result) {
-          child.stdin.write(
-            `${JSON.stringify({ method: "account/rateLimits/read", id: 2 })}\n`,
-          );
+          child.stdin.write(`${JSON.stringify({ method: "account/read", id: 2 })}\n`);
         } else if (message.id === 2) {
+          const account = asRecord(asRecord(message.result)?.account);
+          const email = scalarString(account?.email);
+          if (!email || email.toLowerCase() !== expectedAccountEmail.trim().toLowerCase()) {
+            finish(null);
+          } else {
+            child.stdin.write(`${JSON.stringify({ method: "account/rateLimits/read", id: 3 })}\n`);
+          }
+        } else if (message.id === 3) {
           finish(normalizeCodexRateLimits(message.result));
         }
       }
@@ -252,13 +246,11 @@ async function readFromCommand(
 }
 
 /** Read supplemental local Codex limits without reading or exposing auth files. */
-export async function readCodexUsageSupplement(options?: {
+export async function readCodexUsageSupplement(options: {
   command?: string;
   timeoutMs?: number;
+  expectedAccountEmail: string;
 }): Promise<ProviderSupplement | null> {
-  for (const command of commandCandidates(options?.command)) {
-    const result = await readFromCommand(command, options?.timeoutMs ?? 5_000);
-    if (result) return result;
-  }
-  return null;
+  const command = options.command?.trim() || process.env.CODEX_CLI_PATH?.trim() || "codex";
+  return readFromCommand(command, options.timeoutMs ?? 5_000, options.expectedAccountEmail);
 }

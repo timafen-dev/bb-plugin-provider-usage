@@ -322,7 +322,7 @@ test("accounts CLI keeps four machine/provider identities and quota0 separate", 
     assert.equal(byKey["host-2:claude-code"].status, "ok");
     assert.equal(byKey["host-2:codex"].credits, null);
     assert.equal(byKey["host-2:codex"].resetCredits, null);
-    assert.equal(byKey["host-2:codex"].enrichmentScope, "primary-only");
+    assert.equal(byKey["host-2:codex"].enrichmentScope, "owning-host");
 
     const reloaded = await harness.lifecycle.reload(plugin);
     const repeated = await reloaded.harness.behavior.runCli([

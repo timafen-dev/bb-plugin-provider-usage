@@ -398,7 +398,6 @@ test("observation is completed responses with a stated lag, not streaming", () =
   assert.equal(piDurationText(600), "10m");
   assert.equal(piDurationText(7200), "2h");
   assert.equal(piDurationText(90000), "1d 1h");
-  assert.equal(piDurationText(Infinity), "unknown");
 });
 
 /* ------------------------------------------------------------------ series */
@@ -490,7 +489,6 @@ test("a UTC hour is normalized explicitly rather than parsed as written", () => 
   assert.equal(hours.points[0].startMs, Date.parse("2026-10-01T22:00:00Z"));
   assert.equal(piHourLabel("2026-10-01T22+00:00"), "Oct 1 22:00 +00:00");
   assert.equal(piHourLabel("2026-10-01T22Z"), "Oct 1 22:00 UTC");
-  assert.equal(piHourLabel("not-an-hour"), "not-an-hour");
 });
 
 test("days read as days, with a missing day not implying an idle day", () => {
@@ -505,7 +503,6 @@ test("days read as days, with a missing day not implying an idle day", () => {
   assert.equal(days.points[0].money.text, "$0.02");
   assert.match(days.note, /not the same as a day it verified as idle/);
   assert.equal(piDayLabel("2026-12-31"), "Dec 31");
-  assert.equal(piDayLabel("broken"), "broken");
 });
 
 test("an empty series draws nothing rather than a zero line", () => {

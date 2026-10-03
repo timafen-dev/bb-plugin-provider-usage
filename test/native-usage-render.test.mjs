@@ -24,8 +24,9 @@ const { assembleDashboard } = await jiti.import(join(repo, "lib", "dashboard.ts"
 const { normalizeProviderLimits } = await jiti.import(join(repo, "lib", "provider-limits.ts"), {});
 const { overlayLastGoodLimits, rememberGoodLimits } = await jiti.import(join(repo, "lib", "limits-cache.ts"), {});
 let HomepageUsage;
+let DashboardPage;
 app.default({ slots: {
-  navPanel: () => {},
+  navPanel: (registration) => { DashboardPage = registration.component; },
   homepageSection: (registration) => { HomepageUsage = registration.component; },
 } });
 
@@ -64,6 +65,37 @@ test("homepage retains rate-limited quota visibly marked Last known", async () =
     assert.match(rendered(), /60% left/);
   } finally {
     if (tree) await renderer.act(async () => { tree.unmount(); });
+    setRpcCall(null);
+    globalThis.window = saved.window;
+    globalThis.document = saved.document;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = saved.act;
+  }
+});
+
+test("native panel renders each source observation and visible unplaced raw amount", async () => {
+  const saved = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
+  const { assembleTokenSnapshot } = await jiti.import(join(repo, "lib", "tokens.ts"), {});
+  const observedAt = "2026-10-02T12:00:00.000Z";
+  const snapshot = { ...assembleTokenSnapshot({ days: 7, fileCount: 1, changedFiles: 0, sources: ["cursor"], daily: {} }), observations: [{
+    machineId: "host", machineName: "Host", provider: "cursor", sourceId: "/fixture/session/S",
+    tokens: 0, rawTokens: 900, unknownWindow: 900, observedAt, status: "stale", birthMs: 1790982945000, mtimeMs: 1790983000000, message: "Source could not be read; last known amounts retained.",
+  }] };
+  let tree;
+  try {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+    globalThis.window = { setInterval: () => 1, clearInterval: () => {} };
+    globalThis.document = { visibilityState: "visible", addEventListener: () => {}, removeEventListener: () => {} };
+    setRpcCall(async (method) => method === "getTokens" ? snapshot : method === "getDashboard" ? assembleDashboard({ limits: normalizeProviderLimits({}), hosts: [], catalog: [], hostId: null }) : null);
+    await renderer.act(async () => { tree = renderer.create(React.createElement(DashboardPage)); });
+    const text = tree.root.findAllByType("p").map((node) => node.children.filter((child) => typeof child === "string").join("")).join("\n");
+    assert.match(text, /900 raw total/);
+    assert.match(text, /observed 2026-10-02T12:00:00.000Z/);
+    assert.match(text, /Last known 900 · unknown window/);
+    assert.match(text, /Filesystem birth/);
+    assert.match(text, /Filesystem mtime/);
+    assert.match(text, /Source could not be read/);
+  } finally {
+    if (tree) await renderer.act(async () => tree.unmount());
     setRpcCall(null);
     globalThis.window = saved.window;
     globalThis.document = saved.document;

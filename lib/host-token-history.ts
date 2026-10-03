@@ -15,16 +15,8 @@ const CACHE_FILE = "token-cache.json";
 const LAST_FILE = "token-last.json";
 
 function entryFrom(file: FileScanResult): FileCacheEntry {
-  return {
-    mtimeMs: file.mtimeMs,
-    size: file.size,
-    daily: file.daily,
-    observedAt: file.observedAt,
-    ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
-    ...(file.blobCount != null
-      ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
-      : {}),
-  };
+  const { path, ...entry } = file;
+  return entry;
 }
 
 async function readJson<T>(path: string): Promise<T | null> {
@@ -68,39 +60,26 @@ export function createHostTokenHistory(options: {
     );
     cache = new Map(Array.isArray(rows) ? rows : []);
     last = await readJson<MachineTokens>(join(options.dataDir, LAST_FILE));
-    if (last) {
-      const observedAt = [...cache.values()].map((entry) =>
-        entry.observedAt ?? "1970-01-01T00:00:00.000Z",
-      ).sort()[0] ?? "1970-01-01T00:00:00.000Z";
-      if (observedAt < last.scannedAt) last.scannedAt = observedAt;
-    }
+    if (last) last.slices = slicesFromScan({ files: [...cache].map(([path, entry]) => ({ ...entry, path })), daily: {} });
   };
 
-  const scanOnce = async (): Promise<MachineTokens> => {
+  const scanOnce = async (force: boolean): Promise<MachineTokens> => {
     await load();
     const result = await scan({
       cached: cache!,
       includeCursor: true,
       includeOpencode: true,
+      force,
     });
-    const scannedAt = result.files.map((file) =>
-      file.observedAt ?? "1970-01-01T00:00:00.000Z",
-    ).sort()[0] ?? "1970-01-01T00:00:00.000Z";
-    // Rebuilt from this scan alone, so files that aged out or were deleted
-    // stop taking up room.
+    const scannedAt = new Date(now()).toISOString();
     const next = new Map(result.files.map((file) => [file.path, entryFrom(file)]));
-    const dropped = cache!.size !== next.size;
     cache = next;
-    if (result.changedFiles > 0 || dropped) {
-      await writeJson(join(options.dataDir, CACHE_FILE), [...next]);
-    }
+    await writeJson(join(options.dataDir, CACHE_FILE), [...next]);
     last = {
       computer,
       scannedAt,
       changedFiles: result.changedFiles,
-      slices: slicesFromScan(result).map(({ provider, location, fileCount, daily }) =>
-        ({ provider, location, fileCount, daily }),
-      ),
+      slices: slicesFromScan(result),
     };
     await writeJson(join(options.dataDir, LAST_FILE), last);
     return last;
@@ -124,7 +103,7 @@ export function createHostTokenHistory(options: {
       }
       if (!running) {
         const lease = input.retain?.();
-        running = scanOnce().finally(() => {
+        running = scanOnce(input.force === true).finally(() => {
           running = null;
           lease?.dispose();
         });

@@ -431,7 +431,7 @@ function TokenUsageSection() {
             </div>
             {data.totals.tokens === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No transcript token events in the last {data.days} days.
+                No date-placed transcript token events in the last {data.days} days.
               </p>
             ) : (
               <TokenChart snapshot={data} />
@@ -456,6 +456,20 @@ function TokenUsageSection() {
                       </span>
                     ) : null}
                   </span>
+                ))}
+              </div>
+            ) : null}
+            {data.observations?.length ? (
+              <div className="space-y-1 text-xs text-muted-foreground">
+                {data.observations.map((source) => (
+                  <p key={`${source.machineId}:${source.provider}:${source.sourceId}`} title={source.sourceId}>
+                    {source.machineName} · {source.provider} · {source.sourceId} · {formatTokenCount(source.rawTokens)} raw total · observed {source.observedAt ?? "unknown"}
+                    {source.status === "stale" ? " · Last known" : ""}
+                    {source.unknownWindow > 0 ? ` · Last known ${formatTokenCount(source.unknownWindow)} · unknown window` : ""}
+                    {source.birthMs !== null ? ` · Filesystem birth ${new Date(source.birthMs).toISOString()}` : ""}
+                    {source.mtimeMs !== null ? ` · Filesystem mtime ${new Date(source.mtimeMs).toISOString()}` : ""}
+                    {source.message ? ` · ${source.message}` : ""}
+                  </p>
                 ))}
               </div>
             ) : null}

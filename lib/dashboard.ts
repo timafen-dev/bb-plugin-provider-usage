@@ -501,7 +501,7 @@ export function formatDashboardText(snapshot: DashboardSnapshot): string {
     lines.push(bits.join(" · "));
     if (provider.status !== "ok") {
       lines.push(`  ${statusLabel(provider.status)}${provider.message ? ` — ${provider.message}` : ""}`);
-      continue;
+      if (provider.status !== "stale") continue;
     }
     if (provider.windows.length === 0) {
       lines.push("  No subscription windows reported");

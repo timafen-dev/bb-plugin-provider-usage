@@ -106,7 +106,7 @@ export function piSpendIsKnown(amount: PiMoneyShape): boolean {
 
 /** The exact recorded sum, as digits rather than a float. */
 export function piExactCost(amount: PiMoneyShape): PiDecimal {
-  return piDecimal(amount.known_cost_usd_exact) ?? { units: 0n, scale: 0 };
+  return piDecimal(amount.known_cost_usd_exact)!;
 }
 
 export type PiFreshness =

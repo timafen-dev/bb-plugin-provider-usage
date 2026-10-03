@@ -1,18 +1,10 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import {
-  isCursorStorePath,
-  mergeCursorDaily,
-  scanCursorStores,
-} from "./cursor-scan";
-import {
-  isOpencodeStorePath,
-  mergeOpencodeDaily,
-  scanOpencodeStores,
-} from "./opencode-scan";
+import { isCursorStorePath, scanCursorStores } from "./cursor-scan";
+import { isOpencodeStorePath, scanOpencodeStores } from "./opencode-scan";
 import {
   addBucket,
   dayKey,
@@ -26,6 +18,11 @@ export interface FileScanResult {
   path: string;
   observedAt?: string;
   retained?: boolean;
+  provider?: string;
+  events?: TokenEvent[];
+  unknownWindow?: TokenBucket;
+  birthMs?: number;
+  readError?: boolean;
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
@@ -36,6 +33,12 @@ export interface FileScanResult {
 
 export type FileCacheEntry = {
   observedAt?: string;
+  retained?: boolean;
+  provider?: string;
+  events?: TokenEvent[];
+  unknownWindow?: TokenBucket;
+  birthMs?: number;
+  readError?: boolean;
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
@@ -295,7 +298,9 @@ async function parseFile(
 ): Promise<{
   daily: Record<string, TokenBucket>;
   keyedEvents?: Record<string, TokenEvent>;
+  events: TokenEvent[];
 }> {
+  const events: TokenEvent[] = [];
   const daily: Record<string, TokenBucket> = {};
   const keyedEvents: Record<string, TokenEvent> | undefined =
     providerId === "claude-code" ? {} : undefined;
@@ -324,6 +329,7 @@ async function parseFile(
         const bucket = bucketDelta(running.bucket, previousCodexTotal);
         previousCodexTotal = running.bucket;
         if (bucket.tokens > 0 || bucket.cached > 0) {
+          events.push({ atMs: running.atMs, bucket });
           addDaily(daily, running.atMs, bucket);
         }
         continue;
@@ -359,9 +365,10 @@ async function parseFile(
       if (fingerprint === lastFingerprint) continue;
       lastFingerprint = fingerprint;
     }
+    events.push(hit);
     addDaily(daily, hit.atMs, hit.bucket);
   }
-  return keyedEvents ? { daily, keyedEvents } : { daily };
+  return { daily, keyedEvents, events };
 }
 
 /**
@@ -371,35 +378,102 @@ async function parseFile(
 export function seedDailyFromCache(
   daily: DailyProviderBuckets,
   sources: string[],
-  cached: Iterable<[string, { daily: Record<string, TokenBucket>; observedAt?: string }]>,
+  cached: Iterable<[string, FileCacheEntry]>,
   kind: "cursor" | "opencode",
   files: FileScanResult[],
 ): number {
   const present = new Set(files.map((file) => file.path));
-  const retained: FileScanResult[] = [];
+  let added = 0;
   for (const [path, row] of cached) {
     if (!present.has(path) && (kind === "cursor" ? isCursorStorePath(path) : isOpencodeStorePath(path))) {
-      retained.push({
-        path, mtimeMs: 0, size: 0, daily: row.daily,
-        observedAt: row.observedAt ?? "1970-01-01T00:00:00.000Z",
-        retained: true,
-      });
+      const file = retainedFile(path, row, kind, Date.now(), false);
+      if (!file) continue;
+      files.push(file);
+      added += 1;
     }
   }
-  if (retained.length === 0) return 0;
-  if (kind === "cursor") mergeCursorDaily(daily, retained);
-  else mergeOpencodeDaily(daily, retained);
-  files.push(...retained);
-  if (!sources.includes(kind)) sources.push(kind);
-  return retained.length;
+  const selected = selectCursorFiles(files);
+  for (const file of selected) if (file.provider === "cursor") unplaceCursor(file);
+  files.splice(0, files.length, ...selected);
+  const rebuilt = dailyFromFiles(files);
+  for (const day of Object.keys(daily)) delete daily[day];
+  Object.assign(daily, rebuilt);
+  if (added > 0 && !sources.includes(kind)) sources.push(kind);
+  return added;
+}
+
+function unplaceCursor(file: FileScanResult): void {
+  const total = { ...(file.unknownWindow ?? emptyBucket()) };
+  for (const bucket of Object.values(file.daily)) addBucket(total, bucket);
+  file.unknownWindow = total;
+  file.daily = {};
+}
+
+function retainedFile(path: string, prior: FileCacheEntry, provider: string, nowMs: number, failed = true): FileScanResult | null {
+  let info;
+  try { info = statSync(path); } catch { info = null; }
+  if (info && info.mtimeMs < nowMs - NINETY_DAYS_MS) return null;
+  const removed = info === null;
+  const unknownWindow = { ...(prior.unknownWindow ?? emptyBucket()) };
+  if (removed && !prior.events) for (const bucket of Object.values(prior.daily)) addBucket(unknownWindow, bucket);
+  return { ...prior, path, provider, daily: removed && !prior.events ? {} : prior.daily, unknownWindow, retained: true, readError: !removed && (failed || prior.readError === true) };
+}
+
+export function cursorSessionLocation(path: string): string {
+  return join(dirname(dirname(path)).includes("acp-sessions")
+    ? dirname(dirname(dirname(path)))
+    : dirname(dirname(dirname(dirname(path)))), "session", basename(dirname(path)));
+}
+
+export function selectCursorFiles(files: FileScanResult[]): FileScanResult[] {
+  const selected = new Map<string, FileScanResult>();
+  for (const file of files) {
+    if (!isCursorStorePath(file.path)) continue;
+    const key = cursorSessionLocation(file.path);
+    const prior = selected.get(key);
+    const exists = (path: string) => { try { return statSync(path).isFile(); } catch { return false; } };
+    if (!prior || (exists(file.path) && !exists(prior.path)) || (exists(file.path) === exists(prior.path) && !prior.path.includes("acp-sessions") && file.path.includes("acp-sessions"))) selected.set(key, file);
+  }
+  return files.filter((file) => !isCursorStorePath(file.path) || selected.get(cursorSessionLocation(file.path)) === file);
+}
+
+export function fileProvider(path: string, provider?: string): string | undefined {
+  if (provider) return provider;
+  if (isCursorStorePath(path)) return "cursor";
+  if (isOpencodeStorePath(path)) return "opencode";
+  return tokenRoots().find((source) => path.startsWith(`${source.root}/`))?.id;
+}
+
+export function dailyFromFiles(files: FileScanResult[]): DailyProviderBuckets {
+  const daily: DailyProviderBuckets = {};
+  const keyed = new Map<string, TokenEvent>();
+  const add = (provider: string, day: string, bucket: TokenBucket) => {
+    const row = daily[day] ??= {};
+    addBucket(row[provider] ??= emptyBucket(), bucket);
+  };
+  for (const file of selectCursorFiles(files)) {
+    const provider = fileProvider(file.path, file.provider);
+    if (!provider) continue;
+    if (file.events) {
+      for (const event of file.events) add(provider, dayKey(event.atMs), event.bucket);
+    } else {
+      for (const [day, bucket] of Object.entries(file.daily)) add(provider, day, bucket);
+    }
+    for (const [id, event] of Object.entries(file.keyedEvents ?? {})) {
+      const prior = keyed.get(id);
+      if (!prior || event.bucket.tokens > prior.bucket.tokens || (event.bucket.tokens === prior.bucket.tokens && event.atMs >= prior.atMs)) keyed.set(id, event);
+    }
+  }
+  for (const event of keyed.values()) add("claude-code", dayKey(event.atMs), event.bucket);
+  return daily;
 }
 
 function observedFile(file: FileScanResult, prior: FileCacheEntry | undefined): FileScanResult {
-  const retained = file.daily === prior?.daily;
+  const retained = file.daily === prior?.daily || (file.unknownWindow !== undefined && prior?.unknownWindow !== undefined && JSON.stringify(file.unknownWindow) === JSON.stringify(prior.unknownWindow));
   return {
     ...file,
-    observedAt: retained ? prior?.observedAt ?? "1970-01-01T00:00:00.000Z" : new Date().toISOString(),
-    retained,
+    observedAt: retained ? prior?.observedAt : new Date().toISOString(),
+    retained: file.readError === true,
   };
 }
 
@@ -408,6 +482,7 @@ export async function scanTokenFiles(options?: {
   includeCursor?: boolean;
   includeOpencode?: boolean;
   cached?: Map<string, FileCacheEntry>;
+  force?: boolean;
 }): Promise<{
   files: FileScanResult[];
   changedFiles: number;
@@ -417,11 +492,11 @@ export async function scanTokenFiles(options?: {
   const nowMs = options?.nowMs ?? Date.now();
   const cutoff = nowMs - NINETY_DAYS_MS;
   const cached = options?.cached ?? new Map();
+  const includeOpencode = options?.includeOpencode !== false || [...cached].some(([path, entry]) => isOpencodeStorePath(path) && !entry.events);
   const files: FileScanResult[] = [];
   const sources: string[] = [];
   let changedFiles = 0;
-  const daily: DailyProviderBuckets = {};
-  const claudeEvents = new Map<string, TokenEvent>();
+
 
   for (const source of tokenRoots()) {
     let listing: string[];
@@ -447,12 +522,18 @@ export async function scanTokenFiles(options?: {
 
       const prior = cached.get(path);
       const stale =
-        !prior ||
+        options?.force || !prior || !prior.events ||
         prior.mtimeMs !== Math.round(info.mtimeMs) ||
         prior.size !== info.size;
-      const parsed = stale
-        ? await parseFile(path, source.id)
-        : { daily: prior.daily, keyedEvents: prior.keyedEvents };
+      let parsed;
+      try {
+        parsed = stale
+          ? await parseFile(path, source.id)
+          : { daily: prior!.daily, keyedEvents: prior!.keyedEvents, events: prior!.events };
+      } catch {
+        if (prior) files.push({ ...prior, path, provider: source.id, retained: true, readError: true });
+        continue;
+      }
       if (stale) changedFiles += 1;
 
       files.push(observedFile({
@@ -460,48 +541,16 @@ export async function scanTokenFiles(options?: {
         mtimeMs: Math.round(info.mtimeMs),
         size: info.size,
         daily: parsed.daily,
+        provider: source.id,
+        events: parsed.events,
         ...(parsed.keyedEvents ? { keyedEvents: parsed.keyedEvents } : {}),
-      }, prior));
+      }, options?.force ? undefined : prior));
 
-      for (const [day, bucket] of Object.entries(parsed.daily) as Array<
-        [string, TokenBucket]
-      >) {
-        const row = daily[day] ?? {};
-        const current = row[source.id] ?? emptyBucket();
-        addBucket(current, bucket);
-        row[source.id] = current;
-        daily[day] = row;
-      }
-
-      for (const [messageId, event] of Object.entries(
-        parsed.keyedEvents ?? {},
-      ) as Array<[string, TokenEvent]>) {
-        const priorEvent = claudeEvents.get(messageId);
-        if (
-          !priorEvent ||
-          event.bucket.tokens > priorEvent.bucket.tokens ||
-          (event.bucket.tokens === priorEvent.bucket.tokens &&
-            event.atMs >= priorEvent.atMs)
-        ) {
-          claudeEvents.set(messageId, event);
-        }
-      }
-    }
-
-    if (source.id === "claude-code") {
-      for (const event of claudeEvents.values()) {
-        const day = dayKey(event.atMs);
-        const row = daily[day] ?? {};
-        const current = row[source.id] ?? emptyBucket();
-        addBucket(current, event.bucket);
-        row[source.id] = current;
-        daily[day] = row;
-      }
     }
   }
 
   const cursorFiles =
-    options?.includeCursor === false ? [] : scanCursorStores({ cached, nowMs });
+    options?.includeCursor === false ? [] : scanCursorStores({ cached: options?.force ? new Map() : cached, nowMs });
   if (cursorFiles.length > 0) {
     sources.push("cursor");
     for (const file of cursorFiles) {
@@ -513,13 +562,14 @@ export async function scanTokenFiles(options?: {
       ) {
         changedFiles += 1;
       }
-      files.push(observedFile(file, prior));
+      const unknownWindow = emptyBucket();
+      for (const bucket of Object.values(file.daily)) addBucket(unknownWindow, bucket);
+      files.push({ ...observedFile({ ...file, unknownWindow }, options?.force ? undefined : prior), provider: "cursor", daily: {}, unknownWindow });
     }
-    mergeCursorDaily(daily, cursorFiles);
   }
 
   const opencodeFiles =
-    options?.includeOpencode === false ? [] : scanOpencodeStores({ cached, nowMs });
+    !includeOpencode ? [] : scanOpencodeStores({ cached: options?.force ? new Map() : cached, nowMs });
   if (opencodeFiles.length > 0) {
     sources.push("opencode");
     for (const file of opencodeFiles) {
@@ -527,10 +577,26 @@ export async function scanTokenFiles(options?: {
       if (!prior || prior.mtimeMs !== file.mtimeMs || prior.size !== file.size) {
         changedFiles += 1;
       }
-      files.push(observedFile(file, prior));
+      files.push({ ...observedFile(file, options?.force ? undefined : prior), provider: "opencode" });
     }
-    mergeOpencodeDaily(daily, opencodeFiles);
   }
 
-  return { files, changedFiles, sources, daily };
+  const present = new Set(files.map((file) => file.path));
+  for (const [path, prior] of cached) {
+    if (present.has(path)) continue;
+    const provider = fileProvider(path, prior.provider);
+    if (!provider || (provider === "cursor" && options?.includeCursor === false) || (provider === "opencode" && !includeOpencode)) continue;
+    const retained = retainedFile(path, prior, provider, nowMs);
+    if (retained) files.push(retained);
+  }
+  const selected = selectCursorFiles(files);
+  for (const file of selected) {
+    if (!sources.includes(file.provider!)) sources.push(file.provider!);
+    if (file.events) {
+      file.daily = {};
+      for (const event of file.events) addDaily(file.daily, event.atMs, event.bucket);
+    }
+    if (file.provider === "cursor") unplaceCursor(file);
+  }
+  return { files: selected, changedFiles, sources, daily: dailyFromFiles(selected) };
 }

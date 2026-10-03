@@ -18,6 +18,12 @@ export const claudeMachineUsageSchema = z
     planLabel: z.string().nullable(),
     message: z.string().nullable(),
     directory: z.string(),
+    codexSupplement: z.object({
+      windows: z.array(z.object({ label: z.string(), usedPercent: z.number(), resetsAt: z.string().nullable() }).strict()),
+      credits: z.object({ hasCredits: z.boolean(), unlimited: z.boolean(), balance: z.string().nullable() }).strict().nullable(),
+      spendControl: z.object({ used: z.string(), limit: z.string(), remainingPercent: z.number(), resetsAt: z.string().nullable(), reached: z.boolean().nullable() }).strict().nullable(),
+      resetCredits: z.object({ availableCount: z.number(), nextExpiresAt: z.string().nullable(), title: z.string().nullable(), description: z.string().nullable() }).strict().nullable(),
+    }).strict().nullable().optional(),
     windows: z.array(
       z
         .object({
@@ -53,6 +59,15 @@ export const machineTokensSchema = z
           location: z.string(),
           fileCount: z.number().int(),
           daily: z.record(z.string(), tokenBucketSchema),
+          sourceId: z.string().optional(),
+          observedAt: z.string().optional(),
+          retained: z.boolean().optional(),
+          readError: z.boolean().optional(),
+          events: z.array(z.object({ atMs: z.number(), bucket: tokenBucketSchema }).strict()).optional(),
+          keyedEvents: z.record(z.string(), z.object({ atMs: z.number(), bucket: tokenBucketSchema }).strict()).optional(),
+          unknownWindow: tokenBucketSchema.optional(),
+          birthMs: z.number().optional(),
+          mtimeMs: z.number().optional(),
         })
         .strict(),
     ),
@@ -116,7 +131,7 @@ export type ExternalPiUsageRead = z.infer<typeof externalPiUsageSchema>;
 export const hostContract = defineRpcContract({
   /** The Claude login this machine actually uses, not the one in $HOME. */
   claudeUsage: {
-    input: z.null(),
+    input: z.union([z.null(), z.object({ codexAccountEmail: z.string().min(1) }).strict()]),
     output: claudeMachineUsageSchema,
   },
   /**

@@ -64,7 +64,6 @@ import {
 import { createLocalThroughputScanner } from "./lib/local-throughput-scan";
 import { createOpencodeLiveThroughputSource } from "./lib/opencode-scan";
 import { createCursorLiveThroughputSource } from "./lib/cursor-scan";
-import { readCodexUsageSupplement } from "./lib/codex-usage";
 import {
   hasRateLimitedProvider,
   overlayLastGoodLimits,
@@ -202,6 +201,11 @@ const tokenSnapshotSchema = z.object({
       byProvider: z.record(z.string(), z.number()),
     }),
   ),
+  observations: z.array(z.object({
+    machineId: z.string(), machineName: z.string(), provider: z.string(),
+    sourceId: z.string(), observedAt: z.string().nullable(), status: z.enum(["ok", "stale"]),
+    tokens: z.number(), unknownWindow: z.number(), rawTokens: z.number(), birthMs: z.number().nullable(), mtimeMs: z.number().nullable(), message: z.string().nullable(),
+  })).optional(),
   machines: z
     .array(
       z.object({
@@ -534,8 +538,11 @@ async function loadDashboard(
   ]);
 
   const codexSupplement =
-    hostId === null && slices.codex.status === "ok" && !providerIsOmitted("codex", omitted)
-      ? await readCodexUsageSupplement()
+    resolvedHostId !== null && slices.codex.status === "ok" && slices.codex.accountEmail && !providerIsOmitted("codex", omitted)
+      ? await bb.hosts.experimental_client({ contract: hostContract })
+        .call("claudeUsage", { codexAccountEmail: slices.codex.accountEmail }, { hostId: resolvedHostId })
+        .then((own) => own.codexSupplement ?? null)
+        .catch(() => null)
       : null;
 
   return assembleDashboard({
@@ -563,7 +570,7 @@ type AccountReadback = {
     windows: DashboardSnapshot["providers"][number]["windows"];
     credits: DashboardSnapshot["providers"][number]["credits"];
     resetCredits: DashboardSnapshot["providers"][number]["resetCredits"];
-    enrichmentScope: "primary-only" | null;
+    enrichmentScope: "owning-host" | null;
     checkedAt: string;
   }>;
 };
@@ -614,7 +621,7 @@ async function loadAccountReadback(
           credits: null,
           resetCredits: null,
           enrichmentScope:
-            key === "codex" ? ("primary-only" as const) : null,
+            key === "codex" ? ("owning-host" as const) : null,
           checkedAt: new Date().toISOString(),
         }));
 
@@ -663,7 +670,7 @@ async function loadAccountReadback(
           credits: provider.credits,
           resetCredits: provider.resetCredits,
           enrichmentScope:
-            provider.key === "codex" ? ("primary-only" as const) : null,
+            provider.key === "codex" ? ("owning-host" as const) : null,
           checkedAt: snapshot.fetchedAt,
         }));
     }),
@@ -740,14 +747,7 @@ type TokenCacheRow = {
   daily_json: string;
 };
 
-type PersistedTokenFile = {
-  version: 2;
-  daily: Record<string, TokenBucket>;
-  keyedEvents?: FileScanResult["keyedEvents"];
-  blobCount?: number;
-  maxRowid?: number;
-  observedAt?: string;
-};
+type PersistedTokenFile = Omit<FileCacheEntry, "mtimeMs" | "size"> & { version: 2 };
 
 type LocalTokenScan = Awaited<ReturnType<typeof scanTokenFiles>> & { scannedAt: string };
 
@@ -812,6 +812,7 @@ function createTokenStore(bb: BbPluginApi) {
         ? parsed
         : { version: 2, daily: parsed as Record<string, TokenBucket> };
       loadCache.set(row.path, {
+        ...persisted,
         mtimeMs: row.mtime_ms,
         size: row.size,
         daily: persisted.daily,
@@ -857,6 +858,7 @@ function createTokenStore(bb: BbPluginApi) {
           file.mtimeMs,
           file.size,
           JSON.stringify({
+            ...file,
             version: 2,
             daily: file.daily,
             observedAt: file.observedAt,
@@ -867,6 +869,7 @@ function createTokenStore(bb: BbPluginApi) {
           } satisfies PersistedTokenFile),
         );
         loadCache.set(file.path, {
+          ...file,
           mtimeMs: file.mtimeMs,
           size: file.size,
           daily: file.daily,
@@ -971,6 +974,7 @@ function createTokenStore(bb: BbPluginApi) {
     // A machine that answered with nothing in the window is only noise.
     return {
       ...snapshot,
+      observations: merged.observations,
       machines: merged.machines.filter(
         (row) => row.status !== "ok" || row.tokens > 0,
       ),
@@ -1052,13 +1056,14 @@ function createTokenStore(bb: BbPluginApi) {
     if (inflight) return inflight;
     inflight = (async () => {
       const nowMs = Date.now();
-      const cached = force ? new Map() : loadCache;
+      const cached = loadCache;
       const phase1Started = Date.now();
       // jsonl (Codex/Claude) is the cheap first paint. Seed cursor/opencode
       // from the last persisted totals so those series never vanish while
       // the heavier stores refresh.
       const jsonl = await scanLocalTokens({
         cached,
+        force,
         includeCursor: false,
         includeOpencode: false,
       });
@@ -1074,6 +1079,7 @@ function createTokenStore(bb: BbPluginApi) {
       const [full] = await Promise.all([
         scanLocalTokens({
           cached: loadCache,
+          force,
           includeCursor: true,
           includeOpencode: true,
         }),

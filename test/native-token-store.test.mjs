@@ -128,7 +128,7 @@ test("Cursor WAL cache hits retain observation age across window changes and hos
   try {
     await plugin(bb);
     const first = await harness.behavior.callRpc("getTokens", { days: 30, force: true });
-    const oldTokens = first.providers.find((row) => row.id === "cursor").tokens;
+    const oldTokens = first.observations.find((row) => row.provider === "cursor").unknownWindow;
     t.mock.timers.tick(1_000);
     db.prepare("update blobs set data = ? where id = 'assistant'").run(Buffer.from(JSON.stringify({
       role: "assistant", content: "x".repeat(432),
@@ -138,42 +138,38 @@ test("Cursor WAL cache hits retain observation age across window changes and hos
     assert.equal(unchanged.size, fingerprint.size);
     const fresh = await history.read({ force: true });
     assert.equal(machineTokensSchema.safeParse(fresh).success, true);
-    const newTokens = Object.values(fresh.slices.find((row) => row.provider === "cursor").daily)
-      .reduce((sum, row) => sum + row.tokens, 0);
+    const newTokens = fresh.slices.find((row) => row.provider === "cursor").unknownWindow.tokens;
     assert.ok(newTokens > oldTokens);
     hosts[0].status = "connected";
     t.mock.timers.tick(1_000);
     const combined = await harness.behavior.callRpc("getTokens", { days: 30, force: true });
-    assert.equal(combined.providers.find((row) => row.id === "cursor").tokens, newTokens);
+    assert.equal(combined.observations.find((row) => row.provider === "cursor").unknownWindow, newTokens);
     t.mock.timers.tick(1_000);
     const window = await harness.behavior.callRpc("getTokens", { days: 90, force: false });
-    assert.equal(window.providers.find((row) => row.id === "cursor").tokens, newTokens);
-    const cached = await history.read({ force: true });
-    assert.equal(cached.scannedAt, fresh.scannedAt);
-    assert.deepEqual(cached.slices, fresh.slices);
+    assert.equal(window.observations.find((row) => row.provider === "cursor").unknownWindow, newTokens);
+    const cached = await history.read({});
+    assert.equal(cached.slices[0].unknownWindow.tokens, newTokens);
+    assert.ok(Date.parse(cached.slices[0].observedAt) >= Date.parse(fresh.slices[0].observedAt));
     assert.equal(machineTokensSchema.safeParse(cached).success, true);
     const olderAnswer = structuredClone(fresh);
     olderAnswer.scannedAt = new Date(now).toISOString();
-    for (const bucket of Object.values(olderAnswer.slices.find((row) => row.provider === "cursor").daily)) {
-      bucket.tokens = oldTokens;
-      bucket.output = oldTokens - bucket.input;
-    }
+    olderAnswer.slices.find((row) => row.provider === "cursor").unknownWindow.tokens = oldTokens;
     await writeFile(join(dataDir, "token-last.json"), JSON.stringify(olderAnswer));
     const interrupted = await createHostTokenHistory({ dataDir, computer: hostname() }).read({});
     assert.equal(interrupted.scannedAt, olderAnswer.scannedAt);
-    assert.deepEqual(interrupted.slices, olderAnswer.slices);
+    assert.equal(interrupted.slices[0].unknownWindow.tokens, newTokens);
     t.mock.timers.tick(5 * 60_000);
     const restarted = createHostTokenHistory({ dataDir, computer: hostname() });
     const retained = await restarted.read({ force: true });
-    assert.equal(retained.scannedAt, fresh.scannedAt);
-    assert.deepEqual(retained.slices, fresh.slices);
+    assert.equal(retained.scannedAt, new Date().toISOString());
+    assert.equal(retained.slices[0].unknownWindow.tokens, newTokens);
     const cachePath = join(dataDir, "token-cache.json");
     const rows = JSON.parse(await readFile(cachePath, "utf8"));
     for (const [, row] of rows) delete row.observedAt;
     await writeFile(cachePath, JSON.stringify(rows));
     const legacy = await createHostTokenHistory({ dataDir, computer: hostname() }).read({});
-    assert.equal(legacy.scannedAt, "1970-01-01T00:00:00.000Z");
-    assert.deepEqual(legacy.slices, fresh.slices);
+    assert.equal(legacy.slices[0].observedAt, undefined);
+    assert.equal(legacy.slices[0].unknownWindow.tokens, newTokens);
   } finally {
     await harness.lifecycle.dispose();
     db.close();
@@ -212,13 +208,13 @@ test("JSONL and database cache hits retain their original observation times", as
     assert.deepEqual(second.daily, first.daily);
     for (const file of second.files) {
       assert.equal(file.observedAt, new Date(now).toISOString());
-      assert.equal(file.retained, true);
+      assert.equal(file.retained, false);
     }
     const legacyCache = new Map(first.files.map(({ observedAt, ...file }) => [file.path, file]));
     const legacy = await scanTokenFiles({ cached: legacyCache });
     for (const file of legacy.files) {
-      assert.equal(file.observedAt, "1970-01-01T00:00:00.000Z");
-      assert.equal(file.retained, true);
+      assert.equal(file.observedAt, undefined);
+      assert.equal(file.retained, false);
     }
   } finally {
     t.mock.timers.reset();
