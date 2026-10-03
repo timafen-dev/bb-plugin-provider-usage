@@ -27,23 +27,24 @@ A provider bb ships stays listed even when it is not installed, because that is
 real news; a plugin-supplied provider such as Muse Code appears only once its
 plugin is installed.
 
-On the primary machine, Codex adds purchased-credit balance, banked reset count
-and expiry, model-specific limit buckets, and any on-demand spend control the
-Codex backend reports.
+Codex can also show credit balances, banked resets, model-specific limits and
+on-demand spend controls; see [How it works](#how-it-works) for source ownership.
 
 **Token usage, for every provider.** A 7 / 30 / 90-day multi-series chart of
 real token volume, broken out into total, uncached input, output, and cached,
 per provider. Total follows the provider's canonical count where one is
 available and includes cached input; the cached field is also retained as a
-breakdown. Cursor's ACP stores do not include token counters, so its series is
-estimated from the recorded conversation text. The data reads from two tiers:
+breakdown. For Cursor's text-derived estimates and other unplaced amounts, see
+[How it works](#how-it-works). The data reads from two tiers:
 
 - **Transcript scanners** for the agents that keep detailed local records —
   Codex (`~/.codex`, or `$CODEX_HOME`), Claude Code (`~/.claude`, or
   `$CLAUDE_CONFIG_DIR`), Cursor's ACP session stores, opencode
   (`~/.local/share/opencode`, or `$XDG_DATA_HOME/opencode`), and Muse Code
   (`~/.local/share/muse`, or `$MUSE_HOME`/`$XDG_DATA_HOME`). These give full
-  history and exact per-day attribution, back to before you installed BB.
+  history back to before you installed BB. Timestamp-bearing records give exact
+  per-day attribution; Cursor's timeless estimates are separate observations,
+  not chart points (see [How it works](#how-it-works)).
 - **BB's own usage events** for everything else. As soon as a provider emits
   `thread/tokenUsage/updated`, an agent this plugin has never heard of — a new
   ACP agent, one you wrote yourself — lands in the chart automatically, with a
@@ -52,16 +53,17 @@ estimated from the recorded conversation text. The data reads from two tiers:
 Providers with a dedicated scanner are excluded from the second tier, so
 nothing is counted twice.
 
-**Multi-machine.** If you have more than one host paired, a machine picker
-switches the whole view between them.
+**Multi-machine.** Subscription panes show each paired machine separately;
+native token history combines machine sources without counting shared files
+twice.
 
 **Source selector.** A *BB-native / Firstmate Pi* control at the top of the page
 chooses which dataset you are looking at. Native is everything above and is
 unchanged by its presence; Pi is one external producer's recorded task usage,
 read as its own dataset and never folded into a native total or a plan's
 remaining quota. See [Firstmate Pi, as a separate
-source](#firstmate-pi-as-a-separate-source) — it is implementation-ready, not
-live.
+source](#firstmate-pi-as-a-separate-source), including its separate activation
+requirements.
 
 It also contributes a homepage section and a sidebar accessory, so the tightest
 window follows you around without opening the panel.
@@ -93,7 +95,8 @@ bb usage --json                   # same, machine-readable
 bb usage accounts --json          # separate Codex/Claude identity + status per machine
 bb usage live                     # what is being burned right now, by thread
 bb usage tokens --days 30         # global token volume across providers
-bb usage --machine <id-or-name>   # read another paired host
+bb usage tokens --days 90 --force # cold-reparse token sources
+bb usage --machine <id-or-name>   # that host's quota; token totals stay global
 ```
 
 Agents get the same data through the bundled `usage` skill, which is how a
@@ -101,20 +104,24 @@ long-running thread can decide whether to keep going or wait for a reset.
 
 ## How it works
 
-Subscription windows come from BB's own `system.usageLimits` for each signed-in
-provider. On the primary machine, a read-only `codex app-server` request fills
-in newer Codex fields that BB's provider-neutral schema does not yet carry. It
-uses the existing Codex sign-in and never reads, stores, or returns auth tokens.
-If the installed Codex version does not support the request, the panel silently
-falls back to BB's regular windows.
+Subscription windows follow the selected machine (the configured primary by
+default). BB's `system.usageLimits` supplies provider windows; Claude uses the
+owning host's `claudeUsage` read and its own login, never another machine's
+fallback. A read-only `codex app-server` request on the owning host fills in
+credit balances, banked resets, model-specific buckets and spend controls that
+BB's provider-neutral schema does not yet carry. Its account must match the
+Codex identity reported for that host. An unsupported request, failed host read
+or account mismatch leaves the BB windows without that enrichment. The Codex
+supplement uses the existing sign-in without reading, storing or returning auth
+tokens.
 
 `bb usage accounts` keeps provider and machine sources separate. A missing
 machine-specific source is reported as `unknown`; an exhausted window remains
 `ok` with `remainingPercent: 0`; an expired or absent login remains
 `expired`/`unauthenticated`. Last-known values used during a rate-limit response
-are marked `stale`, never fresh. Codex credits and banked-reset enrichment is
-primary-only, so remote rows intentionally leave those fields null instead of
-copying credentials between machines.
+are marked `stale`, never fresh, and a newly reported account identity cannot
+reuse another account's last-good quota. Codex enrichment is labelled
+`owning-host`; credentials are not copied between machines.
 
 The on-demand amount shown here is a provider-reported spend-control period. It
 is separate from organization-wide OpenAI Platform API billing. Exact Platform
@@ -123,8 +130,40 @@ this plugin does not ask for or store one.
 
 Token totals come from a background `token-scan` service that walks local
 transcript files, caches per-file results in the plugin's SQLite database, and
-re-syncs every 15 minutes. Only sources whose size or mtime changed are re-read,
-so a large history stays cheap. Nothing is uploaded anywhere.
+re-syncs every 15 minutes. Warm scans reuse unchanged fingerprints; missing
+event instants in timestamp-bearing caches and prior read failures require
+another read. `bb usage tokens --force` requests a cold reparse on local and
+paired-host scanners, restoring exact reporting dates from readable
+timestamp-bearing sources. A forced request arriving during a scan waits for
+a shared cold successor, while
+each caller keeps its requested reporting window. Nothing is uploaded anywhere.
+
+The native chart and provider totals contain only date-placed usage. The panel
+and tokens CLI also expose **per-source observations** (JSON: `observations`):
+the selected source's raw amount and actual `observedAt`, or `unknown` when no
+observation time survives. Cache hits keep the original observation time;
+retained or old readings are marked **Last known**, not fresh. Shared files on
+the same computer are counted once, selecting the latest source observation.
+Cursor's ACP store takes precedence over a competing chats store unless a later
+confirmed ACP removal establishes the fallback; an inconclusive probe does not
+invent removal or refresh the prior presence/absence observation.
+
+Amounts with no recoverable reporting-day membership remain visible separately:
+
+- **Cursor SQLite** never recorded event instants. Its text-derived amounts show
+  **unknown window**, with filesystem birth/mtime and `observedAt` as neutral
+  observation facts, not bounds on event time.
+- **Legacy host `token-cache.json`** amounts whose original transcripts were
+  removed and whose timestamps were lost show **Last known · unknown window**.
+  Surviving event instants remain exactly date-placed; readable live sources are
+  reparsed instead of receiving guessed dates.
+- **Legacy aggregate-only machine responses** show **Historical overlapping
+  observation**, with their own `observedAt` or `unknown`. They are neither
+  added to exact totals nor subtracted to invent a residual, and receive no
+  reporting-day assignment.
+
+A failed read retains available last-known amounts and its diagnostic rather
+than converting a missing reading into zero.
 
 The same pass asks BB for `thread/tokenUsage/updated` on any thread whose
 provider has no dedicated scanner. Those events carry the thread's *running*
@@ -295,20 +334,18 @@ replacement dataset read twice at the same instant is the same dataset, and two
 races would each overwrite what the other observed — including a failure note
 that had just been cleared.
 
-Native RPCs are untouched: `getDashboard`, `getTokens`, `getThroughput` and the
-free-tokens read return exactly what they did before, and no Pi figure enters any
-of them.
+Pi figures travel only through `getExternalPiUsage`, never through the native
+`getDashboard`, `getTokens`, `getThroughput` or free-tokens reads.
 
 ### What the lens shows on the page
 
 The Usage page carries a **source selector**: *BB-native* or *Firstmate Pi*. It
-picks a dataset, not a filter. On *BB-native* the page is exactly what it always
-was — live throughput, the token chart, free tokens and the per-machine
-subscription panes, polling as before. On *Firstmate Pi* those sections unmount,
-their polls stop, and one Pi section takes their place. Nothing is merged in
-either direction, and the subscriptions view stays the single native section it
-has always been: remaining quota and reset windows are account-wide facts and
-are never attributed to a Pi task.
+picks a dataset, not a filter. On *BB-native* the page shows live throughput,
+the native token chart and source observations, free tokens and per-machine
+subscription panes. On *Firstmate Pi* those sections unmount, their polls stop,
+and one Pi section takes their place. Nothing is merged in either direction,
+and the subscriptions view stays native: remaining quota and reset windows
+are account-wide facts and are never attributed to a Pi task.
 
 The Pi section leads with its state, because a figure is only worth as much as
 the reading behind it. The badge reads as good only for a first-hand, in-cadence
@@ -358,21 +395,20 @@ not accumulate anything, and the poll stops when the section is unmounted.
 
 ### Activation is a separate, approved step
 
-This is **implementation-ready, not installed and not live**. Reading a snapshot
-needs a source change in this repository *plus* a tested release — not a config
-toggle and not a flag. Separately from the plugin work, turning it on requires
-its own approval for where the snapshot is placed, how that location is mounted,
-and what permissions it carries. No timer, no polling, and no live wiring is
-installed by the adapter: it reads one fixed, confined location on one
-explicitly approved owning machine, and an unknown or unreachable owning machine
-is reported as unavailable rather than falling back to native data or to zero.
-When polling is eventually enabled, the expected cadence is a 30-second tick
-with a 90-second grace; that is also the cadence the page's Pi section asks at
-while it is open, which is the only timer any of this installs.
+The adapter is included in this source; using it requires a tested plugin
+release and separately approved producer setup for snapshot placement, mounts
+and permissions. Installing the plugin does not install a producer, export
+service or system timer. The Pi section polls while mounted and visible; its
+cadence and freshness grace are defined in [the shared contract
+helpers](lib/pi-usage-shape.ts). Server and host reads schedule no background Pi
+work. An unknown or unreachable owning machine is reported as unavailable
+rather than falling back to native data or to zero.
 
 Until the snapshot location is approved and populated, selecting the Pi lens on
 a machine without it is honest about exactly that: it reports the owning machine
-as unavailable or the snapshot as not placed, and shows no figures — not a zero.
+as unavailable or the snapshot as not placed — not a zero. If an earlier
+validated snapshot is held in process memory, its figures remain visibly
+degraded; otherwise there are no figures to show.
 
 ## Develop
 

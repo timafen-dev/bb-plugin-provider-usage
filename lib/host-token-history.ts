@@ -9,7 +9,7 @@ import {
   type FileScanResult,
 } from "./token-scan";
 
-/** How long a caller waits for a refresh before getting the previous answer. */
+/** Ordinary callers may time out to last-good; forced reads await the scan. */
 const WAIT_MS = 20_000;
 
 const CACHE_FILE = "token-cache.json";
@@ -38,8 +38,10 @@ async function writeJson(path: string, value: unknown): Promise<void> {
 /**
  * The machine side of the token chart. The daemon may stop an idle worker at
  * any time, so both the per-file parse cache and the last answer live in the
- * plugin's data directory; a restarted worker answers at once and re-reads
- * only files that changed.
+ * plugin's data directory. A restart may reuse a recent answer only when its
+ * timestamp-bearing cache has event evidence; legacy caches must first scan
+ * readable originals. Force bypasses warm parse reuse and, during an active
+ * scan, waits for a shared cold successor covering the later request.
  */
 export function createHostTokenHistory(options: {
   dataDir: string;

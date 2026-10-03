@@ -32,8 +32,8 @@ export const PI_FOLDED_MODEL = "other";
 export const PI_MAIN_UNASSIGNED = "main_unassigned";
 
 /**
- * Expected live cadence once a snapshot is actually placed and polling is
- * approved. Both are declared here so freshness has a stated meaning.
+ * Expected producer cadence, also used by the mounted page's polling interval.
+ * The grace defines freshness independently of file modification time.
  */
 export const PI_TICK_SECONDS = 30;
 export const PI_GRACE_SECONDS = 90;

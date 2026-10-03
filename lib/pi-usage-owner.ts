@@ -19,7 +19,7 @@
  *    the reading is still not current.
  *
  * Nothing here enables a poll: resolving the owning machine is what the server
- * does when something asks it, and this task installs no timer.
+ * does when something asks it; this resolver installs no timer.
  */
 
 /**

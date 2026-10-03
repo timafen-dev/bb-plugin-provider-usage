@@ -146,8 +146,8 @@ export const hostContract = defineRpcContract({
   },
   /**
    * One confined read of this machine's fixed Firstmate Pi export location.
-   * Read-only, and nothing about it is live: the server only asks the one
-   * approved owning machine, and only when something asks the server.
+   * Read-only and request-driven: the server asks only the approved owning
+   * machine. Polling is owned by the mounted page, not this host read.
    */
   externalPiUsage: {
     input: z.null(),

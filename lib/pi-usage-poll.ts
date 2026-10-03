@@ -23,8 +23,8 @@
  * Two things this deliberately does not do. It never accumulates: each poll's
  * snapshot replaces the last one entirely, so polling the same artifact twice
  * yields the same totals and no recorded call is ever counted again. And it
- * starts nothing: a poll happens when something asks the server, and this task
- * installs no timer and enables no live wiring.
+ * schedules nothing: a poll happens when something asks the server. The page
+ * owns its mounted polling interval; this reader installs no timer.
  */
 import {
   externalPiUsageSchema,

@@ -201,8 +201,9 @@ function subtractBucket(next: TokenBucket, prev: TokenBucket): TokenBucket {
 
 /**
  * cursortrack on ACP stores: each user request bills the current context
- * window (capped), plus assistant output. Blobs have no timestamps, so the
- * first scan lands on session birth; later growth is attributed to mtime.
+ * window (capped), plus assistant output. Blobs have no event timestamps:
+ * `token-scan.ts` removes provisional day placement before publication and
+ * exposes the amount as an unknown-window observation.
  */
 function readAcpStoreIdentity(file: string): { blobCount: number; maxRowid: number } | null {
   const db = openSqlite(file);
@@ -371,9 +372,8 @@ export function scanCursorStores(options?: {
       daily = prior.daily;
     } else {
       // WAL/SHM mtime chatter used to bust every store. Identity is COUNT +
-      // MAX(rowid): a checkpoint with no new blobs is a cache hit. An older
-      // cache row with totals but no identity is also kept — we just stamp
-      // the identity so the next pass can skip the open entirely.
+      // MAX(rowid): a checkpoint with no new blobs is a cache hit. Missing
+      // identity, a failed prior read or force requires rereading the bucket.
       const nextIdentity = readAcpStoreIdentity(path);
       if (!options?.force && !prior?.readError && prior?.daily && identityUnchanged(prior, nextIdentity)) {
         daily = prior.daily;

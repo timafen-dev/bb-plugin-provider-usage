@@ -48,7 +48,12 @@ async function readAccountEmail(directory: string): Promise<string | null> {
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
-    claudeUsage: async (input, context): Promise<ClaudeMachineUsage & { codexSupplement?: ProviderSupplement | null }> => {
+    claudeUsage: async (input, context): Promise<
+      Omit<ClaudeMachineUsage, "status"> & {
+        status: ClaudeMachineUsage["status"] | "unknown";
+        codexSupplement?: ProviderSupplement | null;
+      }
+    > => {
       if (input !== null) {
         return {
           status: "unknown" as const, accountEmail: null, planLabel: null,

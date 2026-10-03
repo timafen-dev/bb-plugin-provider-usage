@@ -294,8 +294,8 @@ export const rpcContract = defineRpcContract({
    * `lib/pi-usage-source.ts` and the owning machine is chosen by the server
    * from its own approved list. Nothing here touches the native datasets — Pi
    * figures are never added to BB totals and never read as subscription
-   * consumption — and nothing here is live: the read happens when the page
-   * asks, with no timer and no background service of its own.
+   * consumption. This RPC is request-driven: the mounted page owns polling,
+   * with no server timer or background Pi service.
    */
   getExternalPiUsage: {
     input: z.null(),
@@ -523,7 +523,7 @@ async function loadDashboard(
       (everyHost.length > 0 && hosts.length === 0) ||
       (owner !== null && isMachineHidden(hidden, owner))) {
     return assembleDashboard({
-      limits: Object.fromEntries(PROVIDER_KEYS.map((key) =>
+      limits: Object.fromEntries<ProviderLimitSlice>(PROVIDER_KEYS.map((key) =>
         [key, { status: "not_installed", windows: [] }],
       )) as Record<ProviderKey, ProviderLimitSlice>,
       hosts,
