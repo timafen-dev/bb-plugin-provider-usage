@@ -60,6 +60,7 @@ export const machineTokensSchema = z
           fileCount: z.number().int(),
           daily: z.record(z.string(), tokenBucketSchema),
           sourceId: z.string().optional(),
+          cursorRepresentation: z.enum(["acp", "chats", "missing-acp", "missing-chats"]).optional(),
           observedAt: z.string().optional(),
           retained: z.boolean().optional(),
           readError: z.boolean().optional(),

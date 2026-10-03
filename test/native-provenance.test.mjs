@@ -79,6 +79,28 @@ test("per-file observations survive host persistence and select Cursor120 despit
   assert.equal(unknown.slices.find((row) => row.provider === "codex").observedAt, undefined);
 });
 
+test("host token wire accepts optional Cursor representation provenance and unchanged legacy slices", () => {
+  const now = Date.now();
+  const legacy = { computer: "pc", scannedAt: new Date(now).toISOString(), changedFiles: 0, slices: [{
+    provider: "cursor", location: "/cursor", sourceId: "/cursor/session/S", fileCount: 1,
+    daily: {}, unknownWindow: bucket(8120), retained: true, readError: true,
+  }] };
+  const parsed = machineTokensSchema.parse(legacy);
+  assert.deepEqual(parsed, legacy);
+  assert.equal(Object.hasOwn(parsed.slices[0], "cursorRepresentation"), false);
+  assert.equal(Object.hasOwn(parsed.slices[0], "observedAt"), false);
+  for (const cursorRepresentation of ["acp", "chats", "missing-acp", "missing-chats"]) {
+    const wire = structuredClone(legacy);
+    wire.slices[0].cursorRepresentation = cursorRepresentation;
+    assert.deepEqual(machineTokensSchema.parse(JSON.parse(JSON.stringify(wire))), wire);
+  }
+  for (const cursorRepresentation of ["unknown", "/private/store.db", true, null]) {
+    const wire = structuredClone(legacy);
+    wire.slices[0].cursorRepresentation = cursorRepresentation;
+    assert.equal(machineTokensSchema.safeParse(wire).success, false);
+  }
+});
+
 test("newest-wins operates independently within one provider:160 not140", async () => {
   const now = Date.now();
   const slices = (first, second, firstAt, secondAt) => [

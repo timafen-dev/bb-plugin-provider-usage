@@ -117,6 +117,61 @@ test("newest observations win regardless of registration order", () => {
   assert.equal(retained.machines[0].tokens, 100);
 });
 
+test("Cursor representation precedence precedes observation age without inventing legacy provenance", () => {
+  const cursor = (representation, tokens, at) => ({
+    ...slice("cursor", "/cursor", tokens), sourceId: "/cursor/session/S", daily: {}, unknownWindow: bucket(tokens),
+    observedAt: at === undefined ? undefined : new Date(at).toISOString(),
+    ...(representation === undefined ? {} : { cursorRepresentation: representation }),
+  });
+  const cases = [
+    ["acp", "chats", "older"], ["chats", "acp", "newer"],
+    ["acp", "acp", "newer"], ["chats", "chats", "newer"],
+    ["missing-acp", "chats", "newer"], ["chats", "missing-acp", "older"],
+    ["missing-chats", "acp", "newer"], ["acp", "missing-chats", "older"],
+    ["missing-acp", "missing-chats", "older"], ["missing-chats", "missing-acp", "newer"],
+    [undefined, "chats", "newer"], ["acp", undefined, "newer"], [undefined, undefined, "newer"],
+  ];
+  for (const [oldRepresentation, newRepresentation, winner] of cases) {
+    const older = machine("older", "pc", [{ ...cursor(oldRepresentation, 8120, testNow - 60_000), retained: true, readError: true }]);
+    const newer = machine("newer", "pc", [cursor(newRepresentation, 8100, testNow)]);
+    for (const sources of [[older, newer], [newer, older]]) {
+      const original = JSON.stringify(sources);
+      const merged = mergeMachineTokens(sources, 7, testNow);
+      assert.equal(merged.fileCount, 1);
+      assert.equal(merged.observations.length, 1);
+      assert.equal(merged.observations[0].machineId, winner);
+      assert.equal(merged.observations[0].unknownWindow, winner === "older" ? 8120 : 8100);
+      assert.equal(merged.observations[0].observedAt, winner === "older" ? older.tokens.slices[0].observedAt : newer.tokens.slices[0].observedAt);
+      assert.equal(merged.observations[0].status, winner === "older" ? "stale" : "ok");
+      assert.deepEqual(merged.daily, {});
+      assert.equal(JSON.stringify(sources), original);
+    }
+  }
+  const acp = machine("acp", "pc", [{ ...cursor("acp", 8120, testNow - 60_000), retained: true, readError: true }]);
+  const chats = machine("chats", "pc", [cursor("chats", 8100, testNow)]);
+  const legacy = machine("legacy", "pc", [cursor(undefined, 8000, undefined)]);
+  for (const sources of [[acp, chats, legacy], [legacy, chats, acp], [chats, acp, legacy], [acp, legacy, chats]]) {
+    const merged = mergeMachineTokens(sources, 7, testNow);
+    assert.equal(merged.observations.length, 1);
+    assert.equal(merged.observations[0].unknownWindow, 8120);
+    assert.equal(merged.observations[0].observedAt, acp.tokens.slices[0].observedAt);
+  }
+  const unknownAge = structuredClone(acp);
+  delete unknownAge.tokens.slices[0].observedAt;
+  const unknown = mergeMachineTokens([chats, unknownAge], 7, testNow);
+  assert.equal(unknown.observations[0].unknownWindow, 8120);
+  assert.equal(unknown.observations[0].observedAt, null);
+  assert.equal(Object.hasOwn(legacy.tokens.slices[0], "cursorRepresentation"), false);
+  for (const field of ["computer", "location", "sourceId"]) {
+    const separate = structuredClone(chats);
+    if (field === "computer") separate.tokens.computer = "other-pc";
+    else separate.tokens.slices[0][field] += "/other";
+    const merged = mergeMachineTokens([acp, separate], 7, testNow);
+    assert.equal(merged.fileCount, 2);
+    assert.equal(merged.observations.length, 2);
+  }
+});
+
 test("overlapping opencode database sets count each database once", () => {
   const scan = (paths) => ({
     files: paths.map(([path, tokens]) => ({ path, daily: { [today]: bucket(tokens) } })),

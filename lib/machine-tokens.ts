@@ -1,8 +1,9 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isCursorStorePath } from "./cursor-scan";
 import {
-  cursorSessionLocation, selectCursorFiles, tokenRoots, unplaceCursor,
+  cursorSessionLocation, cursorStoreExists, selectCursorFiles, tokenRoots, unplaceCursor,
   type DailyProviderBuckets, type FileScanResult, type TokenEvent,
 } from "./token-scan";
 import {
@@ -16,6 +17,7 @@ export interface MachineTokenSlice {
   provider: string;
   location: string;
   sourceId?: string;
+  cursorRepresentation?: "acp" | "chats" | "missing-acp" | "missing-chats";
   fileCount: number;
   daily: Record<string, TokenBucket>;
   observedAt?: string;
@@ -63,6 +65,11 @@ export function slicesFromScan(
       provider,
       location: real(root?.root ?? (provider === "cursor" ? join(home, ".cursor") : file.path)),
       sourceId: real(provider === "cursor" ? cursorSessionLocation(file.path) : file.path),
+      ...(provider === "cursor" && isCursorStorePath(file.path) ? {
+        cursorRepresentation: file.path.includes("acp-sessions")
+          ? cursorStoreExists(file.path) ? "acp" as const : "missing-acp" as const
+          : cursorStoreExists(file.path) ? "chats" as const : "missing-chats" as const,
+      } : {}),
       fileCount: 1,
       daily: file.daily,
       observedAt: file.observedAt,
@@ -106,10 +113,18 @@ export function mergeMachineTokens(
   }
   const selected: Choice[] = [];
   const newer = (a: Choice, b: Choice) => a.at > b.at || (a.at === b.at && (b.source.error || b.slice.retained) && !a.source.error && !a.slice.retained);
+  const cursorPriority = { acp: 3, chats: 2, "missing-acp": 1, "missing-chats": 0 };
   for (const group of groups.values()) {
+    const preferredCursor = new Map<string, number>();
+    for (const { slice } of group) {
+      if (slice.provider !== "cursor" || !slice.cursorRepresentation) continue;
+      const id = slice.sourceId!;
+      preferredCursor.set(id, Math.max(preferredCursor.get(id) ?? -1, cursorPriority[slice.cursorRepresentation]));
+    }
     const files = new Map<string, Choice>();
     for (const row of group) {
       const id = row.slice.sourceId!;
+      if (row.slice.provider === "cursor" && row.slice.cursorRepresentation && cursorPriority[row.slice.cursorRepresentation] < preferredCursor.get(id)!) continue;
       const prior = files.get(id);
       if (!prior || newer(row, prior)) files.set(id, row);
     }

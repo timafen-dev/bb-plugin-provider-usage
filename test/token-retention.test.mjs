@@ -243,16 +243,31 @@ test("competing chats8100 cannot replace inaccessible ACP8120 across refresh, pa
     assert.deepEqual((await restarted.read({})).slices, expected);
     const refreshed = await restarted.read({ force: true });
     assert.deepEqual(refreshed.slices, expected);
-    const merged = mergeMachineTokens([{ id: "host", name: "Host", error: null, tokens: refreshed }], 7);
-    assert.equal(merged.observations.length, 1);
-    assert.equal(merged.observations[0].unknownWindow, 8120);
-    assert.equal(merged.observations[0].rawTokens, 8120);
-    assert.equal(merged.observations[0].observedAt, second.slices[0].observedAt);
-    assert.equal(merged.observations[0].status, "stale");
-    const text = formatTokenText({ ...assembleTokenSnapshot({ days: 7, fileCount: 1, changedFiles: 0, sources: merged.providers, daily: merged.daily }), observations: merged.observations });
-    assert.ok(text.includes(`Last known ${formatTokenCount(8120)} · unknown window`));
-    assert.ok(text.includes(`observed ${second.slices[0].observedAt}`));
-    assert.match(text, /could not be read/);
+    const local = await scanTokenFiles({ force: true });
+    assert.deepEqual(local.files.map((file) => file.path), [chats]);
+    const server = { id: "server", name: "Server", error: null, tokens: {
+      computer: "pc", scannedAt: new Date().toISOString(), changedFiles: local.changedFiles, slices: slicesFromScan(local),
+    } };
+    const host = { id: "host", name: "Host", error: null, tokens: JSON.parse(JSON.stringify(refreshed)) };
+    assert.equal(host.tokens.slices[0].cursorRepresentation, "acp");
+    assert.equal(server.tokens.slices[0].cursorRepresentation, "chats");
+    assert.equal(server.tokens.slices[0].sourceId, host.tokens.slices[0].sourceId);
+    assert.ok(Date.parse(server.tokens.slices[0].observedAt) > Date.parse(host.tokens.slices[0].observedAt));
+    for (const sources of [[host, server], [server, host], JSON.parse(JSON.stringify([server, host]))]) {
+      const merged = mergeMachineTokens(sources, 7);
+      assert.equal(merged.fileCount, 1);
+      assert.deepEqual(merged.daily, {});
+      assert.equal(merged.observations.length, 1);
+      assert.equal(merged.observations[0].machineId, "host");
+      assert.equal(merged.observations[0].unknownWindow, 8120);
+      assert.equal(merged.observations[0].rawTokens, 8120);
+      assert.equal(merged.observations[0].observedAt, second.slices[0].observedAt);
+      assert.equal(merged.observations[0].status, "stale");
+      const text = formatTokenText({ ...assembleTokenSnapshot({ days: 7, fileCount: 1, changedFiles: 0, sources: merged.providers, daily: merged.daily }), observations: merged.observations });
+      assert.ok(text.includes(`Last known ${formatTokenCount(8120)} · unknown window`));
+      assert.ok(text.includes(`observed ${second.slices[0].observedAt}`));
+      assert.match(text, /could not be read/);
+    }
   }
   t.mock.restoreAll();
   syncBuiltinESMExports();
@@ -298,6 +313,9 @@ test("Cursor selection distinguishes proven absence in either direction and cach
         assert.equal(slices.length, 1);
         assert.equal(slices[0].unknownWindow.tokens, tokens);
         assert.equal(slices[0].observedAt, observedAt);
+        const representation = chosen === acp ? "acp" : "chats";
+        const missing = ["ENOENT", "ENOTDIR"].includes(faults.get(chosen));
+        assert.equal(slices[0].cursorRepresentation, `${missing ? "missing-" : ""}${representation}`);
         const paint = { files: [], daily: {}, sources: [] };
         seedDailyFromCache(paint.daily, paint.sources, rows.map(({ path, ...entry }) => [path, entry]), "cursor", paint.files);
         assert.deepEqual(paint.files.map((file) => file.path), [chosen]);
