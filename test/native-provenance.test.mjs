@@ -56,7 +56,7 @@ test("per-file observations survive host persistence and select Cursor120 despit
   const { home, dataDir } = await fixture(t);
   const t0 = Date.now(), t1 = t0 + 60_000, t2 = t0 + 180_000;
   let clock = t0;
-  const codex = { path: join(home, "codex/sessions/a.jsonl"), provider: "codex", mtimeMs: t0, size: 1, daily: { [dayKey(t0)]: bucket(5) }, observedAt: new Date(t0).toISOString() };
+  const codex = { path: join(home, "codex/sessions/a.jsonl"), provider: "codex", mtimeMs: t0, size: 1, daily: { [dayKey(t0)]: bucket(5) }, events: [{ atMs: t0, bucket: bucket(5) }], observedAt: new Date(t0).toISOString() };
   const cursor = (tokens, at) => ({ path: join(home, ".cursor/acp-sessions/S/store.db"), provider: "cursor", mtimeMs: at, size: tokens, daily: {}, unknownWindow: bucket(tokens), observedAt: new Date(at).toISOString() });
   const scan = async () => ({ files: clock === t0 ? [codex] : [codex, cursor(120, t2)], changedFiles: 1, sources: [], daily: {} });
   const history = createHostTokenHistory({ dataDir, computer: "pc", now: () => clock, scan });
@@ -154,7 +154,7 @@ test("removed daily-only host cache stays visible with unknown window and unknow
 
 test("genuine instants rebucket across timezone, cold force and removed Claude replay", async (t) => {
   const { home, dataDir } = await fixture(t);
-  const at = Date.parse("2026-10-01T23:30:00Z"), now = Date.parse("2026-10-02T12:00:00Z");
+  const at = Date.parse("2026-10-01T23:30:00Z"), now = Date.parse("2026-10-01T23:45:00Z");
   t.mock.timers.enable({ apis: ["Date"], now });
   const codexDir = join(home, "codex/sessions"), claudeDir = join(home, "claude/projects/p"), ocDir = join(home, "xdg/opencode");
   for (const dir of [codexDir, claudeDir, ocDir]) await mkdir(dir, { recursive: true });
@@ -223,4 +223,108 @@ test("unreadable legacy stores expose raw900 without guessing reporting-day memb
   assert.equal(merged.observations[0].unknownWindow, 0);
   assert.equal(merged.observations[0].status, "stale");
   assert.match(merged.observations[0].message, /reporting-day membership cannot be recovered/);
+});
+
+test("fresh legacy host caches cold-reconstruct readable originals before returning after restart", async (t) => {
+  const { home, dataDir } = await fixture(t);
+  const at = Date.parse("2026-10-01T23:30:00Z"), now = at + 60_000;
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const codexDir = join(home, "codex/sessions"), ocDir = join(home, "xdg/opencode"), claudeDir = join(home, "claude/projects/p");
+  for (const directory of [codexDir, ocDir, claudeDir]) await mkdir(directory, { recursive: true });
+  const codex = join(codexDir, "s.jsonl"), oc = join(ocDir, "opencode.db");
+  await codexFile(codex, at, 100);
+  opencodeDb(oc, at, 200);
+  const claude = JSON.stringify({ type: "assistant", timestamp: new Date(at).toISOString(), message: { id: "same", usage: { input_tokens: 300 } } }) + "\n";
+  const paths = [codex, oc, join(claudeDir, "a.jsonl"), join(claudeDir, "b.jsonl")];
+  for (const path of paths.slice(2)) await writeFile(path, claude);
+  for (const path of paths) await utimes(path, new Date(now), new Date(now));
+  process.env.TZ = "Asia/Tokyo";
+  const old = await scanTokenFiles();
+  assert.equal(old.daily["2026-10-02"].codex.tokens, 100);
+  const legacy = old.files.map(({ events, path, ...entry }) => [path, entry]);
+  await writeFile(join(dataDir, "token-cache.json"), JSON.stringify(legacy));
+  await writeFile(join(dataDir, "token-last.json"), JSON.stringify({ computer: "pc", scannedAt: new Date(now).toISOString(), changedFiles: 0, slices: slicesFromScan(old) }));
+  process.env.TZ = "UTC";
+  const restored = machineTokensSchema.parse(await createHostTokenHistory({ dataDir, computer: "pc" }).read({}));
+  assert.ok(restored.slices.every((slice) => slice.events !== undefined));
+  assert.equal(restored.slices.find((slice) => slice.provider === "codex").daily["2026-10-01"].tokens, 100);
+  assert.equal(restored.slices.find((slice) => slice.provider === "opencode").daily["2026-10-01"].tokens, 200);
+  const merged = mergeMachineTokens([source("host", restored)], 7, now);
+  assert.equal(merged.machines[0].tokens, 600);
+  assert.equal(merged.daily["2026-10-01"]["claude-code"].tokens, 300);
+  assert.equal(merged.daily["2026-10-02"], undefined);
+  assert.ok(merged.observations.every((row) => row.unknownWindow === 0));
+  const replay = await createHostTokenHistory({ dataDir, computer: "pc" }).read({});
+  assert.deepEqual(replay.slices, restored.slices);
+});
+
+test("fresh removed legacy host caches separate irrecoverable amounts from surviving keyed instants", async (t) => {
+  const { home, dataDir } = await fixture(t);
+  const at = Date.parse("2026-10-01T23:30:00Z"), now = at + 60_000;
+  t.mock.timers.enable({ apis: ["Date"], now });
+  process.env.TZ = "UTC";
+  const rows = [
+    [join(home, "codex/sessions/removed.jsonl"), { mtimeMs: now, size: 1, daily: { "2026-10-02": bucket(100) } }],
+    [join(home, "xdg/opencode/opencode.db"), { mtimeMs: now, size: 1, daily: { "2026-10-02": bucket(200) } }],
+    ...["a", "b"].map((name) => [join(home, `claude/projects/p/${name}.jsonl`), { mtimeMs: now, size: 1, daily: name === "a" ? { "2026-10-02": bucket(50) } : {}, observedAt: new Date(at).toISOString(), keyedEvents: { same: { atMs: at, bucket: bucket(900) } } }]),
+  ];
+  await writeFile(join(dataDir, "token-cache.json"), JSON.stringify(rows));
+  await writeFile(join(dataDir, "token-last.json"), JSON.stringify({ computer: "pc", scannedAt: new Date(now).toISOString(), changedFiles: 0, slices: [] }));
+  const restored = machineTokensSchema.parse(await createHostTokenHistory({ dataDir, computer: "pc" }).read({}));
+  const merged = mergeMachineTokens([source("host", restored)], 7, now);
+  assert.equal(merged.daily["2026-10-01"]["claude-code"].tokens, 900);
+  assert.equal(merged.daily["2026-10-02"], undefined);
+  assert.equal(merged.observations.reduce((total, row) => total + row.unknownWindow, 0), 350);
+  assert.equal(merged.observations.reduce((total, row) => total + row.rawTokens, 0), 1250);
+  assert.ok(merged.observations.filter((row) => row.provider === "claude-code").every((row) => row.observedAt === new Date(at).toISOString()));
+  const snapshot = { ...assembleTokenSnapshot({ days: 7, fileCount: merged.fileCount, changedFiles: 0, sources: merged.providers, daily: merged.daily }), observations: merged.observations };
+  const text = formatTokenText(snapshot);
+  assert.match(text, /Last known 100 · unknown window/);
+  assert.match(text, /Last known 200 · unknown window/);
+  assert.match(text, /Last known 50 · unknown window/);
+  assert.deepEqual((await createHostTokenHistory({ dataDir, computer: "pc" }).read({})).slices, restored.slices);
+});
+
+test("legacy Cursor history stays unplaced across fresh restart, force, cached paint and growth", async (t) => {
+  const { home, dataDir } = await fixture(t);
+  const directory = join(home, ".cursor/acp-sessions/S");
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, "store.db");
+  cursorDb(path, 100);
+  const info = await stat(path), now = Date.now(), observedAt = new Date(now - 60_000).toISOString();
+  const daily = {
+    "2026-10-01": { ...bucket(8000), input: 8000 },
+    "2026-10-02": { ...bucket(600), input: 0, output: 600, turns: 0 },
+  };
+  const entry = { mtimeMs: Math.round(info.mtimeMs), birthMs: Math.round(info.birthtimeMs), size: info.size, daily, blobCount: 2, maxRowid: 2, observedAt };
+  await writeFile(join(dataDir, "token-cache.json"), JSON.stringify([[path, entry]]));
+  await writeFile(join(dataDir, "token-last.json"), JSON.stringify({ computer: "pc", scannedAt: new Date(now).toISOString(), changedFiles: 0, slices: [] }));
+  const history = createHostTokenHistory({ dataDir, computer: "pc" });
+  const fresh = await history.read({});
+  assert.deepEqual(fresh.slices[0].daily, {});
+  assert.equal(fresh.slices[0].unknownWindow.tokens, 8600);
+  const forced = await history.read({ force: true });
+  assert.deepEqual(forced.slices[0].daily, {});
+  assert.equal(forced.slices[0].unknownWindow.tokens, 8600);
+  assert.equal(forced.slices[0].observedAt, observedAt);
+  const paint = { daily: {}, sources: [], files: [] };
+  seedDailyFromCache(paint.daily, paint.sources, new Map([[path, entry]]), "cursor", paint.files);
+  assert.deepEqual(paint.daily, {});
+  assert.equal(slicesFromScan(paint)[0].unknownWindow.tokens, 8600);
+  const db = new DatabaseSync(path);
+  db.prepare("update blobs set data = ? where rowid = 2").run(Buffer.from(JSON.stringify({ role: "assistant", content: "x".repeat(6480) })));
+  db.close();
+  const grown = machineTokensSchema.parse(await history.read({ force: true }));
+  assert.equal(grown.slices[0].unknownWindow.tokens, 9800);
+  assert.deepEqual(grown.slices[0].daily, {});
+  const merged = mergeMachineTokens([source("host", grown)], 7);
+  assert.deepEqual(merged.daily, {});
+  assert.equal(merged.observations[0].rawTokens, 9800);
+  assert.equal(merged.observations[0].unknownWindow, 9800);
+  assert.equal(merged.observations[0].birthMs, Math.round(info.birthtimeMs));
+  const text = formatTokenText({ ...assembleTokenSnapshot({ days: 7, fileCount: 1, changedFiles: 0, sources: merged.providers, daily: merged.daily }), observations: merged.observations });
+  assert.match(text, /unknown window/);
+  assert.match(text, /Filesystem birth/);
+  assert.match(text, /Filesystem mtime/);
+  assert.doesNotMatch(text, /not earlier|not later|event time/i);
 });

@@ -1,6 +1,7 @@
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import { isCursorStorePath } from "./cursor-scan";
 import { MACHINE_TOKENS_FRESH_MS, slicesFromScan, type MachineTokens } from "./machine-tokens";
 import {
   scanTokenFiles,
@@ -60,7 +61,11 @@ export function createHostTokenHistory(options: {
     );
     cache = new Map(Array.isArray(rows) ? rows : []);
     last = await readJson<MachineTokens>(join(options.dataDir, LAST_FILE));
-    if (last) last.slices = slicesFromScan({ files: [...cache].map(([path, entry]) => ({ ...entry, path })), daily: {} });
+    if ([...cache].some(([path, entry]) => !isCursorStorePath(path) && entry.events === undefined)) {
+      last = null;
+    } else if (last) {
+      last.slices = slicesFromScan({ files: [...cache].map(([path, entry]) => ({ ...entry, path })), daily: {} });
+    }
   };
 
   const scanOnce = async (force: boolean): Promise<MachineTokens> => {

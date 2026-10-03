@@ -402,7 +402,7 @@ export function seedDailyFromCache(
   return added;
 }
 
-function unplaceCursor(file: FileScanResult): void {
+export function unplaceCursor(file: FileScanResult): void {
   const total = { ...(file.unknownWindow ?? emptyBucket()) };
   for (const bucket of Object.values(file.daily)) addBucket(total, bucket);
   file.unknownWindow = total;
@@ -550,7 +550,7 @@ export async function scanTokenFiles(options?: {
   }
 
   const cursorFiles =
-    options?.includeCursor === false ? [] : scanCursorStores({ cached: options?.force ? new Map() : cached, nowMs });
+    options?.includeCursor === false ? [] : scanCursorStores({ cached, nowMs, force: options?.force });
   if (cursorFiles.length > 0) {
     sources.push("cursor");
     for (const file of cursorFiles) {
@@ -564,7 +564,7 @@ export async function scanTokenFiles(options?: {
       }
       const unknownWindow = emptyBucket();
       for (const bucket of Object.values(file.daily)) addBucket(unknownWindow, bucket);
-      files.push({ ...observedFile({ ...file, unknownWindow }, options?.force ? undefined : prior), provider: "cursor", daily: {}, unknownWindow });
+      files.push({ ...observedFile({ ...file, unknownWindow }, prior), provider: "cursor", daily: {}, unknownWindow });
     }
   }
 

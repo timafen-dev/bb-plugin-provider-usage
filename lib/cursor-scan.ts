@@ -337,6 +337,7 @@ export function scanCursorStores(options?: {
   nowMs?: number;
   home?: string;
   cached?: Map<string, CursorCacheEntry>;
+  force?: boolean;
 }): CursorFileScan[] {
   const cached = options?.cached ?? new Map();
   const cutoff = (options?.nowMs ?? Date.now()) - 90 * 24 * 60 * 60 * 1000;
@@ -355,7 +356,7 @@ export function scanCursorStores(options?: {
     const entry = cached.get(path);
     const prior = entry?.unknownWindow ? { ...entry, daily: { unknown: entry.unknownWindow } } : entry;
     const fingerprintStale =
-      !prior ||
+      options?.force || !prior ||
       prior.mtimeMs !== times.mtimeMs ||
       prior.size !== times.size;
 
@@ -373,7 +374,7 @@ export function scanCursorStores(options?: {
       // cache row with totals but no identity is also kept — we just stamp
       // the identity so the next pass can skip the open entirely.
       const nextIdentity = readAcpStoreIdentity(path);
-      if (prior?.daily && identityUnchanged(prior, nextIdentity)) {
+      if (!options?.force && prior?.daily && identityUnchanged(prior, nextIdentity)) {
         daily = prior.daily;
         identity = nextIdentity ?? identity;
       } else {

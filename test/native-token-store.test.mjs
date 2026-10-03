@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -254,6 +254,53 @@ test("persisted database history survives startup and unreadable window-change s
   } finally {
     if (reloaded) await reloaded.harness.lifecycle.dispose();
     await harness.lifecycle.dispose();
+    await cleanup();
+  }
+});
+
+test("local tokens CLI force cold-reconstructs Codex and Opencode in the current dashboard day", async (t) => {
+  const { home, cleanup } = await homeForTest();
+  const at = Date.parse("2026-10-01T23:30:00Z"), now = at + 60_000;
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const sessions = join(home, "codex/sessions"), directory = join(home, ".local/share/opencode");
+  await mkdir(sessions, { recursive: true });
+  await mkdir(directory, { recursive: true });
+  const codex = join(sessions, "usage.jsonl"), opencode = join(directory, "opencode.db");
+  await writeFile(codex, `${JSON.stringify({ type: "event_msg", timestamp: new Date(at).toISOString(), payload: { type: "token_count", info: { total_token_usage: { input_tokens: 100, total_tokens: 100 } } } })}\n`);
+  const Database = (await import("better-sqlite3")).default;
+  const db = new Database(opencode);
+  db.exec("create table message (time_created integer, data text)");
+  db.prepare("insert into message values (?, ?)").run(at, JSON.stringify({ tokens: { total: 200, input: 200 } }));
+  db.close();
+  for (const path of [codex, opencode]) await utimes(path, new Date(now), new Date(now));
+  const { bb, harness } = fakeHost();
+  let reloaded;
+  try {
+    process.env.TZ = "Asia/Tokyo";
+    await plugin(bb);
+    const first = await harness.behavior.callRpc("getTokens", { days: 7, force: true });
+    assert.equal(first.series.at(-1).day, "2026-10-02");
+    assert.equal(first.totals.tokens, 300);
+    const storage = bb.storage.database();
+    for (const row of storage.prepare("select path, daily_json from token_file_cache").all()) {
+      const cached = JSON.parse(row.daily_json);
+      for (const event of cached.events) event.bucket.tokens = 999;
+      storage.prepare("update token_file_cache set daily_json = ? where path = ?").run(JSON.stringify(cached), row.path);
+    }
+    process.env.TZ = "UTC";
+    reloaded = await harness.lifecycle.reload(plugin);
+    const result = await reloaded.harness.behavior.runCli(["tokens", "--days", "7", "--force", "--json"]);
+    assert.equal(result.exitCode, 0);
+    const current = JSON.parse(result.stdout);
+    assert.equal(current.totals.tokens, 300);
+    assert.equal(current.series.at(-1).day, "2026-10-01");
+    assert.equal(current.series.at(-1).byProvider.codex, 100);
+    assert.equal(current.series.at(-1).byProvider.opencode, 200);
+    assert.ok(current.observations.every((row) => row.unknownWindow === 0));
+  } finally {
+    if (reloaded) await reloaded.harness.lifecycle.dispose();
+    await harness.lifecycle.dispose();
+    t.mock.timers.reset();
     await cleanup();
   }
 });

@@ -2,7 +2,7 @@ import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  cursorSessionLocation, selectCursorFiles, tokenRoots,
+  cursorSessionLocation, selectCursorFiles, tokenRoots, unplaceCursor,
   type DailyProviderBuckets, type FileScanResult, type TokenEvent,
 } from "./token-scan";
 import {
@@ -55,6 +55,10 @@ export function slicesFromScan(
     const provider = file.provider ?? (file.path.endsWith("opencode.db") ? "opencode" : file.path.endsWith("store.db") ? "cursor" : roots.find((root) => file.path.startsWith(`${root.root}/`))?.id);
     if (!provider) return [];
     const root = roots.find((row) => row.id === provider);
+    if (provider === "cursor") {
+      file = { ...file };
+      unplaceCursor(file);
+    }
     return [{
       provider,
       location: real(root?.root ?? (provider === "cursor" ? join(home, ".cursor") : file.path)),
