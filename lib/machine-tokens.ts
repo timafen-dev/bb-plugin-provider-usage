@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { isCursorStorePath } from "./cursor-scan";
 import {
-  cursorSessionLocation, cursorStoreExists, selectCursorFiles, tokenRoots, unplaceCursor,
+  cursorSessionLocation, cursorStoreExists, latestCursorAcpPresence, selectCursorFiles, tokenRoots, unplaceCursor,
   type DailyProviderBuckets, type FileScanResult, type TokenEvent,
 } from "./token-scan";
 import {
@@ -117,17 +117,13 @@ export function mergeMachineTokens(
   const newer = (a: Choice, b: Choice) => a.at > b.at || (a.at === b.at && (b.source.error || b.slice.retained) && !a.source.error && !a.slice.retained);
   const cursorPriority = { acp: 3, chats: 2, "missing-acp": 1, "missing-chats": 0 };
   for (const group of groups.values()) {
-    const acpAbsence = new Map<string, number>();
-    for (const { slice } of group) {
-      if (slice.provider !== "cursor" || slice.cursorAcpPresence?.present !== false) continue;
-      const at = Date.parse(slice.cursorAcpPresence.observedAt);
-      if (Number.isFinite(at) && at > 0 && at <= nowMs) acpAbsence.set(slice.sourceId!, Math.max(acpAbsence.get(slice.sourceId!) ?? -Infinity, at));
-    }
+    const latest = latestCursorAcpPresence(group.filter((row) => row.slice.provider === "cursor").map((row) => [row.slice.sourceId!, row.slice.cursorAcpPresence] as const), nowMs);
     const priority = (row: Choice) => {
       const representation = row.slice.cursorRepresentation!;
-      if (representation !== "acp") return cursorPriority[representation];
+      const fact = latest.get(row.slice.sourceId!);
       const at = Date.parse(row.slice.cursorAcpPresence?.observedAt ?? "");
-      return Number.isFinite(at) && at > 0 && at <= nowMs && (row.slice.cursorAcpPresence?.present === false || at < (acpAbsence.get(row.slice.sourceId!) ?? -Infinity)) ? cursorPriority["missing-acp"] : cursorPriority.acp;
+      if (fact && Number.isFinite(at) && at > 0 && at <= nowMs && (representation === "acp" || representation === "missing-acp")) return fact.present ? cursorPriority.acp : cursorPriority["missing-acp"];
+      return cursorPriority[representation];
     };
     const preferredCursor = new Map<string, number>();
     for (const row of group) {

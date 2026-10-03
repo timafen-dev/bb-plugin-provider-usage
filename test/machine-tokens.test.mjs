@@ -191,6 +191,20 @@ test("Cursor removal ordering uses genuine presence observations rather than amo
     invalid.tokens.slices[0].cursorAcpPresence.observedAt = observedAt;
     assert.equal(mergeMachineTokens([acp, invalid], 7, testNow).observations[0].unknownWindow, 8120);
   }
+  const removed = structuredClone(acp);
+  removed.tokens.slices[0].cursorRepresentation = "missing-acp";
+  removed.tokens.slices[0].cursorAcpPresence = { present: false, observedAt: new Date(t1).toISOString() };
+  const recreated = structuredClone(chats);
+  recreated.tokens.slices[0].cursorAcpPresence = { present: true, observedAt: new Date(testNow).toISOString() };
+  for (const sources of [[removed, recreated], [recreated, removed]]) {
+    const original = JSON.stringify(sources);
+    const result = mergeMachineTokens(sources, 7, testNow);
+    assert.equal(result.fileCount, 1);
+    assert.equal(result.observations[0].unknownWindow, 8120);
+    assert.equal(result.observations[0].observedAt, new Date(t1).toISOString());
+    assert.equal(result.observations[0].status, "stale");
+    assert.equal(JSON.stringify(sources), original);
+  }
   const legacy = structuredClone(acp);
   delete legacy.tokens.slices[0].cursorAcpPresence;
   assert.equal(mergeMachineTokens([legacy, chats], 7, testNow).observations[0].unknownWindow, 8120);

@@ -176,6 +176,112 @@ test("server RPC and CLI forced callers run a cold successor after warm local100
   }
 });
 
+test("queued cold scans assemble each caller's reporting window", { timeout: 10000 }, async (t) => {
+  const { home } = await fixture(t);
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const path = join(home, "codex/sessions/a.jsonl");
+  await mkdir(join(path, ".."), { recursive: true });
+  await writeFile(path, [
+    [now - 20 * 86400_000, 900], [now, 1000],
+  ].map(([at, tokens]) => JSON.stringify({ type: "event_msg", timestamp: new Date(at).toISOString(), payload: { type: "token_count", info: { total_token_usage: { total_tokens: tokens, input_tokens: tokens } } } })).join("\n") + "\n");
+  for (const [firstDays, secondDays] of [[7, 90], [90, 7]]) {
+    const started = gate(), released = gate();
+    let threadReads = 0;
+    const remoteForces = [];
+    const { bb, harness } = fakeHost({
+      hosts: [{ id: "remote", name: "Remote", status: "connected" }],
+      call: async ({ input }) => {
+        remoteForces.push(input.force);
+        return { computer: "remote", scannedAt: new Date().toISOString(), changedFiles: 0, slices: [] };
+      },
+      listThreads: async () => {
+        threadReads += 1;
+        if (threadReads === 1) { started.release(); await released.promise; }
+        return [];
+      },
+    });
+    try {
+      await plugin(bb);
+      const initial = await harness.behavior.callRpc("getTokens", { days: 7, force: false });
+      assert.equal(initial.totals.tokens, 100);
+      await started.promise;
+      const first = harness.behavior.callRpc("getTokens", { days: firstDays, force: true });
+      await new Promise(setImmediate);
+      const second = harness.behavior.runCli(["tokens", "--days", String(secondDays), "--force", "--json"]);
+      const third = harness.behavior.callRpc("getTokens", { days: 30, force: true });
+      assert.equal((await harness.behavior.callRpc("getTokens", { days: 7, force: false })).totals.tokens, 100);
+      released.release();
+      const rpc = await first, cli = await second, middle = await third;
+      assert.equal(cli.exitCode, 0);
+      for (const [snapshot, days] of [[rpc, firstDays], [JSON.parse(cli.stdout), secondDays], [middle, 30]]) {
+        assert.equal(snapshot.days, days);
+        assert.equal(snapshot.series.length, days);
+        assert.equal(snapshot.totals.tokens, days === 7 ? 100 : 1000);
+        assert.equal(snapshot.providers.find((row) => row.id === "codex").tokens, days === 7 ? 100 : 1000);
+      }
+      assert.deepEqual(remoteForces, [false, true]);
+      assert.equal(threadReads, 2);
+    } finally {
+      released.release();
+      await harness.lifecycle.dispose();
+    }
+  }
+});
+
+test("server retained competing Cursor cache entries honor confirmed removal after EACCES", { timeout: 10000 }, async (t) => {
+  const { home } = await fixture(t);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const acp = join(home, ".cursor/acp-sessions/S/store.db"), chats = join(home, ".cursor/chats/W/S/store.db");
+  for (const [path, output] of [[acp, 120], [chats, 500]]) {
+    await mkdir(join(path, ".."), { recursive: true });
+    const db = new DatabaseSync(path);
+    db.exec("create table blobs (data blob)");
+    const insert = db.prepare("insert into blobs values (?)");
+    insert.run(Buffer.from(JSON.stringify({ role: "user", content: "hi", providerOptions: { cursor: { requestId: "request" } } })));
+    insert.run(Buffer.from(JSON.stringify({ role: "assistant", content: "x".repeat(output * 3.6) })));
+    db.close();
+  }
+  const { bb, harness } = fakeHost();
+  let reloaded;
+  try {
+    await plugin(bb);
+    const first = await harness.behavior.callRpc("getTokens", { days: 7, force: true });
+    assert.equal(observation(first, "cursor").unknownWindow, 8120);
+    await rm(acp);
+    t.mock.timers.tick(60_000);
+    const removed = await harness.behavior.callRpc("getTokens", { days: 7, force: true });
+    assert.equal(observation(removed, "cursor").unknownWindow, 8500);
+    const cache = new Map(bb.storage.database().prepare("select path, daily_json from token_file_cache").all().map((row) => [row.path, JSON.parse(row.daily_json)]));
+    assert.deepEqual([...cache.keys()].sort(), [acp, chats].sort());
+    assert.equal(cache.get(acp).cursorAcpPresence.present, true);
+    assert.equal(cache.get(chats).cursorAcpPresence.present, false);
+    const statSync = fs.statSync;
+    t.mock.method(fs, "statSync", (path, ...args) => {
+      if (path === acp) throw Object.assign(new Error("synthetic denied ACP traversal"), { code: "EACCES" });
+      return statSync(path, ...args);
+    });
+    syncBuiltinESMExports();
+    t.mock.timers.tick(180_000);
+    const forced = await harness.behavior.callRpc("getTokens", { days: 7, force: true });
+    const warm = await harness.behavior.callRpc("getTokens", { days: 90, force: false });
+    for (const value of [forced, warm]) {
+      assert.equal(value.fileCount, 1);
+      assert.equal(observation(value, "cursor").unknownWindow, 8500);
+      assert.equal(observation(value, "cursor").observedAt, observation(removed, "cursor").observedAt);
+    }
+    reloaded = await harness.lifecycle.reload(plugin);
+    const replay = await reloaded.harness.behavior.callRpc("getTokens", { days: 7, force: false });
+    assert.equal(observation(replay, "cursor").unknownWindow, 8500);
+    const cli = await reloaded.harness.behavior.runCli(["tokens", "--days", "7", "--force", "--json"]);
+    assert.equal(cli.exitCode, 0);
+    assert.equal(observation(JSON.parse(cli.stdout), "cursor").unknownWindow, 8500);
+  } finally {
+    if (reloaded) await reloaded.harness.lifecycle.dispose();
+    await harness.lifecycle.dispose();
+  }
+});
+
 test("later forced host requests share a cold successor after forced100 was already read", { timeout: 5000 }, async (t) => {
   const { home, dataDir } = await fixture(t);
   const path = join(home, "codex/sessions/a.jsonl");

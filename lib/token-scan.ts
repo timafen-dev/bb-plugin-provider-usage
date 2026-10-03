@@ -456,15 +456,35 @@ export function cursorStoreExists(path: string): boolean {
   }
 }
 
+export function latestCursorAcpPresence(
+  rows: Iterable<readonly [string, FileScanResult["cursorAcpPresence"]]>,
+  nowMs = Date.now(),
+) {
+  const latest = new Map<string, NonNullable<FileScanResult["cursorAcpPresence"]>>();
+  for (const [key, fact] of rows) {
+    if (!fact || typeof fact.present !== "boolean") continue;
+    const at = Date.parse(fact.observedAt);
+    if (!Number.isFinite(at) || at <= 0 || at > nowMs) continue;
+    const prior = latest.get(key);
+    if (!prior || at > Date.parse(prior.observedAt) || (at === Date.parse(prior.observedAt) && fact.present)) latest.set(key, fact);
+  }
+  return latest;
+}
+
 export function selectCursorFiles(files: FileScanResult[]): FileScanResult[] {
+  const latest = latestCursorAcpPresence(files.filter((file) => isCursorStorePath(file.path)).map((file) => [cursorSessionLocation(file.path), file.cursorAcpPresence] as const));
+  const exists = (file: FileScanResult) => !(file.path.includes("acp-sessions") && latest.get(cursorSessionLocation(file.path))?.present === false) && cursorStoreExists(file.path);
   const selected = new Map<string, FileScanResult>();
   for (const file of files) {
     if (!isCursorStorePath(file.path)) continue;
     const key = cursorSessionLocation(file.path);
     const prior = selected.get(key);
-    if (!prior || (cursorStoreExists(file.path) && !cursorStoreExists(prior.path)) || (cursorStoreExists(file.path) === cursorStoreExists(prior.path) && !prior.path.includes("acp-sessions") && file.path.includes("acp-sessions"))) selected.set(key, file);
+    if (!prior || (exists(file) && !exists(prior)) || (exists(file) === exists(prior) && !prior.path.includes("acp-sessions") && file.path.includes("acp-sessions"))) selected.set(key, file);
   }
-  return files.filter((file) => !isCursorStorePath(file.path) || selected.get(cursorSessionLocation(file.path)) === file);
+  return files.filter((file) => !isCursorStorePath(file.path) || selected.get(cursorSessionLocation(file.path)) === file).map((file) => {
+    const fact = isCursorStorePath(file.path) ? latest.get(cursorSessionLocation(file.path)) : undefined;
+    return fact && fact !== file.cursorAcpPresence ? { ...file, cursorAcpPresence: fact } : file;
+  });
 }
 
 export function fileProvider(path: string, provider?: string): string | undefined {

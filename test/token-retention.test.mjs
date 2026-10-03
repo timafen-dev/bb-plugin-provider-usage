@@ -279,6 +279,65 @@ test("competing chats8100 cannot replace inaccessible ACP8120 across refresh, pa
   assert.equal(recovered.slices[0].retained, false);
 });
 
+test("latest conclusive session facts govern competing Cursor entries in either order", async (t) => {
+  const { home } = await fixture(t);
+  const now = Date.now(), day = dayKey(now);
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const acp = join(home, ".cursor/acp-sessions/S/store.db"), chats = join(home, ".cursor/chats/W/S/store.db");
+  for (const path of [acp, chats]) {
+    await fsPromises.mkdir(join(path, ".."), { recursive: true });
+    await fsPromises.writeFile(path, "synthetic retained store");
+  }
+  const statSync = fs.statSync;
+  let code;
+  t.mock.method(fs, "statSync", (path, ...args) => {
+    if (path === acp) throw Object.assign(new Error("synthetic inconclusive ACP probe"), { code });
+    return statSync(path, ...args);
+  });
+  syncBuiltinESMExports();
+  const fact = (present, at) => ({ present, observedAt: new Date(at).toISOString() });
+  const older = now - 120_000, newer = now - 60_000;
+  const cases = [
+    [fact(true, older), fact(false, newer), chats],
+    [fact(false, older), fact(true, newer), acp],
+    [fact(true, older), fact(false, older), acp],
+    [fact(true, older), fact(false, now + 1), acp],
+    [fact(true, older), { present: false, observedAt: "invalid" }, acp],
+    [undefined, undefined, acp],
+  ];
+  for (code of ["EACCES", "EPERM", "EIO"]) {
+    for (const [acpFact, chatsFact, winner] of cases) {
+      const acpFile = { path: acp, provider: "cursor", mtimeMs: older, size: 1, daily: { [day]: bucket(120) }, observedAt: new Date(older).toISOString(), cursorAcpPresence: acpFact, retained: true, readError: true };
+      const chatsFile = { path: chats, provider: "cursor", mtimeMs: newer, size: 1, daily: { [day]: bucket(500) }, observedAt: new Date(newer).toISOString(), cursorAcpPresence: chatsFact };
+      for (const files of [[acpFile, chatsFile], [chatsFile, acpFile]]) {
+        const original = JSON.stringify(files), expectedTokens = winner === acp ? 120 : 500;
+        const selected = selectCursorFiles(files);
+        assert.deepEqual(selected.map((file) => file.path), [winner]);
+        assert.equal(dailyFromFiles(files)[day].cursor.tokens, expectedTokens);
+        const projected = slicesFromScan({ files, daily: {} });
+        assert.equal(projected.length, 1);
+        assert.equal(projected[0].unknownWindow.tokens, expectedTokens);
+        assert.equal(projected[0].observedAt, winner === acp ? acpFile.observedAt : chatsFile.observedAt);
+        assert.deepEqual(projected[0].cursorAcpPresence, selected[0].cursorAcpPresence);
+        if (chatsFact?.present && chatsFact.observedAt === new Date(newer).toISOString()) {
+          assert.deepEqual(projected[0].cursorAcpPresence, chatsFact);
+          assert.equal(projected[0].cursorRepresentation, "acp");
+        }
+        if (!acpFact && !chatsFact) assert.equal(Object.hasOwn(projected[0], "cursorAcpPresence"), false);
+        const paint = { files: [], daily: {}, sources: [] };
+        seedDailyFromCache(paint.daily, paint.sources, new Map(files.map(({ path, ...entry }) => [path, entry])), "cursor", paint.files);
+        assert.deepEqual(paint.files.map((file) => file.path), [winner]);
+        const painted = slicesFromScan(paint);
+        assert.equal(painted[0].unknownWindow.tokens, expectedTokens);
+        assert.equal(painted[0].observedAt, projected[0].observedAt);
+        assert.deepEqual(painted[0].cursorAcpPresence, projected[0].cursorAcpPresence);
+        assert.deepEqual(paint.daily, {});
+        assert.equal(JSON.stringify(files), original);
+      }
+    }
+  }
+});
+
 test("later confirmed ACP removal lets chats8500 replace offline ACP8120 across cache restart", { timeout: 5000 }, async (t) => {
   const { home, dataDir } = await fixture(t);
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });

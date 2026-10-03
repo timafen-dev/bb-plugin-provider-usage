@@ -843,8 +843,8 @@ function createTokenStore(bb: BbPluginApi) {
   );
   const readMeta = db.prepare("SELECT value FROM token_meta WHERE key = ?");
 
-  let inflight: Promise<TokenSnapshot> | null = null;
-  let queuedForce: Promise<TokenSnapshot> | null = null;
+  let inflight: Promise<LocalTokenScan> | null = null;
+  let queuedForce: Promise<LocalTokenScan> | null = null;
   let lastSnapshot: TokenSnapshot | null = null;
 
   const publish = () => {
@@ -1053,13 +1053,13 @@ function createTokenStore(bb: BbPluginApi) {
       },
     });
 
-  const sync = async (days: TokenWindowDays, force = false): Promise<TokenSnapshot> => {
+  const refresh = async (days: TokenWindowDays, force = false): Promise<LocalTokenScan> => {
     if (inflight) {
       if (!force) return inflight;
       if (!queuedForce) {
         queuedForce = inflight.catch(() => {}).then(() => {
           queuedForce = null;
-          return sync(days, true);
+          return refresh(days, true);
         });
       }
       return queuedForce;
@@ -1114,14 +1114,17 @@ function createTokenStore(bb: BbPluginApi) {
             .map((source) => `${source.name}${source.error ? " (stale)" : ""}`)
             .join(", ")}]`,
       );
-      const snapshot = snapshotFrom(days, full);
+      snapshotFrom(days, full);
       publish();
-      return snapshot;
+      return full;
     })().finally(() => {
       inflight = null;
     });
     return inflight;
   };
+
+  const sync = async (days: TokenWindowDays, force = false): Promise<TokenSnapshot> =>
+    combine(days, await refresh(days, force));
 
   const get = async (days: TokenWindowDays, force = false) => {
     if (force) return sync(days, true);
