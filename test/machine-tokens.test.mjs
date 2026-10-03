@@ -172,6 +172,31 @@ test("Cursor representation precedence precedes observation age without inventin
   }
 });
 
+test("Cursor removal ordering uses genuine presence observations rather than amount age or legacy guesses", () => {
+  const t1 = testNow - 60_000, t2 = testNow - 30_000;
+  const acp = machine("host", "pc", [{ ...slice("cursor", "/cursor", 0), sourceId: "/cursor/session/S", cursorRepresentation: "acp", daily: {}, unknownWindow: bucket(8120), retained: true, readError: true, observedAt: new Date(t1).toISOString(), cursorAcpPresence: { present: true, observedAt: new Date(t1).toISOString() } }]);
+  const chats = machine("server", "pc", [{ ...slice("cursor", "/cursor", 0), sourceId: "/cursor/session/S", cursorRepresentation: "chats", daily: {}, unknownWindow: bucket(8500), observedAt: new Date(t2).toISOString(), cursorAcpPresence: { present: false, observedAt: new Date(t2).toISOString() } }]);
+  for (const presentAt of [t1, testNow]) {
+    const host = structuredClone(acp);
+    host.tokens.slices[0].cursorAcpPresence.observedAt = new Date(presentAt).toISOString();
+    for (const sources of [[host, chats], [chats, host]]) {
+      const result = mergeMachineTokens(sources, 7, testNow);
+      assert.equal(result.fileCount, 1);
+      assert.equal(result.observations[0].unknownWindow, presentAt === t1 ? 8500 : 8120);
+      assert.equal(result.observations[0].observedAt, new Date(presentAt === t1 ? t2 : t1).toISOString());
+    }
+  }
+  for (const observedAt of ["invalid", new Date(0).toISOString(), new Date(testNow + 1).toISOString()]) {
+    const invalid = structuredClone(chats);
+    invalid.tokens.slices[0].cursorAcpPresence.observedAt = observedAt;
+    assert.equal(mergeMachineTokens([acp, invalid], 7, testNow).observations[0].unknownWindow, 8120);
+  }
+  const legacy = structuredClone(acp);
+  delete legacy.tokens.slices[0].cursorAcpPresence;
+  assert.equal(mergeMachineTokens([legacy, chats], 7, testNow).observations[0].unknownWindow, 8120);
+  assert.equal(Object.hasOwn(legacy.tokens.slices[0], "cursorAcpPresence"), false);
+});
+
 test("overlapping opencode database sets count each database once", () => {
   const scan = (paths) => ({
     files: paths.map(([path, tokens]) => ({ path, daily: { [today]: bucket(tokens) } })),

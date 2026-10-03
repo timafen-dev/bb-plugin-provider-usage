@@ -88,11 +88,21 @@ test("host token wire accepts optional Cursor representation provenance and unch
   const parsed = machineTokensSchema.parse(legacy);
   assert.deepEqual(parsed, legacy);
   assert.equal(Object.hasOwn(parsed.slices[0], "cursorRepresentation"), false);
+  assert.equal(Object.hasOwn(parsed.slices[0], "cursorAcpPresence"), false);
   assert.equal(Object.hasOwn(parsed.slices[0], "observedAt"), false);
   for (const cursorRepresentation of ["acp", "chats", "missing-acp", "missing-chats"]) {
     const wire = structuredClone(legacy);
     wire.slices[0].cursorRepresentation = cursorRepresentation;
     assert.deepEqual(machineTokensSchema.parse(JSON.parse(JSON.stringify(wire))), wire);
+    for (const present of [false, true]) {
+      wire.slices[0].cursorAcpPresence = { present, observedAt: new Date(now).toISOString() };
+      assert.deepEqual(machineTokensSchema.parse(JSON.parse(JSON.stringify(wire))), wire);
+    }
+  }
+  for (const cursorAcpPresence of [null, {}, { present: "false", observedAt: new Date(now).toISOString() }, { present: false }, { present: false, observedAt: 1 }, { present: false, observedAt: new Date(now).toISOString(), path: "/private/store.db" }]) {
+    const wire = structuredClone(legacy);
+    wire.slices[0].cursorAcpPresence = cursorAcpPresence;
+    assert.equal(machineTokensSchema.safeParse(wire).success, false);
   }
   for (const cursorRepresentation of ["unknown", "/private/store.db", true, null]) {
     const wire = structuredClone(legacy);

@@ -61,6 +61,7 @@ export const machineTokensSchema = z
           daily: z.record(z.string(), tokenBucketSchema),
           sourceId: z.string().optional(),
           cursorRepresentation: z.enum(["acp", "chats", "missing-acp", "missing-chats"]).optional(),
+          cursorAcpPresence: z.object({ present: z.boolean(), observedAt: z.string() }).strict().optional(),
           observedAt: z.string().optional(),
           retained: z.boolean().optional(),
           readError: z.boolean().optional(),

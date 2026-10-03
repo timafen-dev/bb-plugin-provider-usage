@@ -16,6 +16,7 @@ export type DailyProviderBuckets = Record<string, Record<string, TokenBucket>>;
 
 export interface FileScanResult {
   path: string;
+  cursorAcpPresence?: { present: boolean; observedAt: string };
   observedAt?: string;
   retained?: boolean;
   provider?: string;
@@ -32,6 +33,7 @@ export interface FileScanResult {
 }
 
 export type FileCacheEntry = {
+  cursorAcpPresence?: FileScanResult["cursorAcpPresence"];
   observedAt?: string;
   retained?: boolean;
   provider?: string;
@@ -425,13 +427,26 @@ function retainedFile(path: string, prior: FileCacheEntry, provider: string, now
   } else if (info && info.mtimeMs < cutoff) return null;
   const unknownWindow = { ...(prior.unknownWindow ?? emptyBucket()) };
   if (removed && !prior.events) for (const bucket of Object.values(prior.daily)) addBucket(unknownWindow, bucket);
-  return { ...prior, path, provider, daily: removed && !prior.events ? {} : prior.daily, unknownWindow, retained: true, readError: !removed && (failed || prior.readError === true) };
+  return { ...prior, path, provider, daily: removed && !prior.events ? {} : prior.daily, unknownWindow, retained: true, readError: !removed && (failed || prior.readError === true),
+    ...(provider === "cursor" && isCursorStorePath(path) ? { cursorAcpPresence: observeCursorAcp(path) ?? prior.cursorAcpPresence } : {}),
+  };
 }
 
 export function cursorSessionLocation(path: string): string {
   return join(dirname(dirname(path)).includes("acp-sessions")
     ? dirname(dirname(dirname(path)))
     : dirname(dirname(dirname(dirname(path)))), "session", basename(dirname(path)));
+}
+
+function observeCursorAcp(path: string): FileScanResult["cursorAcpPresence"] {
+  const acp = path.includes("acp-sessions") ? path : join(dirname(dirname(cursorSessionLocation(path))), "acp-sessions", basename(dirname(path)), "store.db");
+  let present;
+  try { present = statSync(acp).isFile(); } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") return undefined;
+    present = false;
+  }
+  return { present, observedAt: new Date().toISOString() };
 }
 
 export function cursorStoreExists(path: string): boolean {
@@ -579,7 +594,7 @@ export async function scanTokenFiles(options?: {
       }
       const unknownWindow = emptyBucket();
       for (const bucket of Object.values(file.daily)) addBucket(unknownWindow, bucket);
-      files.push({ ...observedFile({ ...file, unknownWindow }, prior), provider: "cursor", daily: {}, unknownWindow });
+      files.push({ ...observedFile({ ...file, unknownWindow }, prior), provider: "cursor", daily: {}, unknownWindow, cursorAcpPresence: observeCursorAcp(file.path) });
     }
   }
 

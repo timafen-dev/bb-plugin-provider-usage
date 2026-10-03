@@ -251,6 +251,7 @@ test("competing chats8100 cannot replace inaccessible ACP8120 across refresh, pa
     const host = { id: "host", name: "Host", error: null, tokens: JSON.parse(JSON.stringify(refreshed)) };
     assert.equal(host.tokens.slices[0].cursorRepresentation, "acp");
     assert.equal(server.tokens.slices[0].cursorRepresentation, "chats");
+    assert.equal(Object.hasOwn(server.tokens.slices[0], "cursorAcpPresence"), false);
     assert.equal(server.tokens.slices[0].sourceId, host.tokens.slices[0].sourceId);
     assert.ok(Date.parse(server.tokens.slices[0].observedAt) > Date.parse(host.tokens.slices[0].observedAt));
     for (const sources of [[host, server], [server, host], JSON.parse(JSON.stringify([server, host]))]) {
@@ -276,6 +277,92 @@ test("competing chats8100 cannot replace inaccessible ACP8120 across refresh, pa
   assert.equal(recovered.slices[0].unknownWindow.tokens, 8120);
   assert.equal(recovered.slices[0].readError, undefined);
   assert.equal(recovered.slices[0].retained, false);
+});
+
+test("later confirmed ACP removal lets chats8500 replace offline ACP8120 across cache restart", { timeout: 5000 }, async (t) => {
+  const { home, dataDir } = await fixture(t);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const chats = join(home, ".cursor/chats/W/S/store.db"), acp = join(home, ".cursor/acp-sessions/S/store.db");
+  for (const [path, output] of [[chats, 500], [acp, 120]]) {
+    await fsPromises.mkdir(join(path, ".."), { recursive: true });
+    const db = new DatabaseSync(path);
+    db.exec("create table blobs (data blob)");
+    const insert = db.prepare("insert into blobs values (?)");
+    insert.run(Buffer.from(JSON.stringify({ role: "user", content: "hi", providerOptions: { cursor: { requestId: "request" } } })));
+    insert.run(Buffer.from(JSON.stringify({ role: "assistant", content: "x".repeat(output * 3.6) })));
+    db.close();
+  }
+  const hostHistory = createHostTokenHistory({ dataDir, computer: "pc" });
+  const first = await hostHistory.read({ force: true });
+  assert.equal(first.slices[0].unknownWindow.tokens, 8120);
+  assert.equal(first.slices[0].cursorRepresentation, "acp");
+  assert.deepEqual(first.slices[0].cursorAcpPresence, { present: true, observedAt: new Date().toISOString() });
+  await fsPromises.writeFile(join(dataDir, "offline-host.json"), JSON.stringify(first));
+  await fsPromises.rm(acp);
+  t.mock.timers.tick(60_000);
+  const serverDir = join(home, "server-data");
+  await fsPromises.mkdir(serverDir);
+  const serverHistory = createHostTokenHistory({ dataDir: serverDir, computer: "pc" });
+  const current = await serverHistory.read({ force: true });
+  assert.equal(current.slices[0].unknownWindow.tokens, 8500);
+  assert.equal(current.slices[0].cursorRepresentation, "chats");
+  assert.deepEqual(current.slices[0].cursorAcpPresence, { present: false, observedAt: new Date().toISOString() });
+  const restarted = await createHostTokenHistory({ dataDir: serverDir, computer: "pc" }).read({});
+  const offline = JSON.parse(await fsPromises.readFile(join(dataDir, "offline-host.json"), "utf8"));
+  for (const value of [current, restarted, JSON.parse(JSON.stringify(restarted))]) {
+    const host = { id: "host", name: "Host", error: "Machine is offline.", tokens: offline };
+    const server = { id: "server", name: "Server", error: null, tokens: value };
+    for (const sources of [[host, server], [server, host]]) {
+      const result = mergeMachineTokens(sources, 7);
+      assert.equal(result.fileCount, 1);
+      assert.equal(result.observations.length, 1);
+      assert.equal(result.observations[0].unknownWindow, 8500);
+      assert.equal(result.observations[0].rawTokens, 8500);
+      assert.equal(result.observations[0].machineId, "server");
+      assert.equal(result.observations[0].observedAt, current.slices[0].observedAt);
+      assert.deepEqual(result.daily, {});
+      const text = formatTokenText({ ...assembleTokenSnapshot({ days: 7, fileCount: 1, changedFiles: 0, sources: result.providers, daily: result.daily }), observations: result.observations });
+      assert.ok(text.includes(`Last known ${formatTokenCount(8500)} · unknown window`));
+    }
+  }
+});
+
+test("recreated ACP presence supersedes older removal without refreshing its unchanged amount", async (t) => {
+  const { home, dataDir } = await fixture(t);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const acp = join(home, ".cursor/acp-sessions/S/store.db"), chats = join(home, ".cursor/chats/W/S/store.db");
+  const createStore = async (path, output) => {
+    await fsPromises.mkdir(join(path, ".."), { recursive: true });
+    const db = new DatabaseSync(path);
+    db.exec("create table blobs (data blob)");
+    const insert = db.prepare("insert into blobs values (?)");
+    insert.run(Buffer.from(JSON.stringify({ role: "user", content: "hi", providerOptions: { cursor: { requestId: "request" } } })));
+    insert.run(Buffer.from(JSON.stringify({ role: "assistant", content: "x".repeat(output * 3.6) })));
+    db.close();
+  };
+  await createStore(acp, 120);
+  await createStore(chats, 500);
+  const history = createHostTokenHistory({ dataDir, computer: "pc" });
+  const first = await history.read({ force: true });
+  await fsPromises.rm(acp);
+  t.mock.timers.tick(60_000);
+  const fallbackScan = await scanTokenFiles({ force: true });
+  const fallback = { computer: "pc", scannedAt: new Date().toISOString(), changedFiles: 1, slices: slicesFromScan(fallbackScan) };
+  t.mock.timers.tick(60_000);
+  await createStore(acp, 120);
+  const recovered = await history.read({ force: true });
+  assert.equal(recovered.slices[0].observedAt, first.slices[0].observedAt);
+  assert.equal(recovered.slices[0].cursorAcpPresence.present, true);
+  assert.ok(Date.parse(recovered.slices[0].cursorAcpPresence.observedAt) > Date.parse(fallback.slices[0].cursorAcpPresence.observedAt));
+  for (const sources of [
+    [{ id: "host", name: "Host", error: null, tokens: recovered }, { id: "server", name: "Server", error: null, tokens: fallback }],
+    [{ id: "server", name: "Server", error: null, tokens: fallback }, { id: "host", name: "Host", error: null, tokens: recovered }],
+  ]) {
+    const result = mergeMachineTokens(sources, 7);
+    assert.equal(result.fileCount, 1);
+    assert.equal(result.observations[0].unknownWindow, 8120);
+    assert.equal(result.observations[0].observedAt, first.slices[0].observedAt);
+  }
 });
 
 test("Cursor selection distinguishes proven absence in either direction and cache representation", async (t) => {

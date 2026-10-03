@@ -53,7 +53,7 @@ export function createHostTokenHistory(options: {
   let cache: Map<string, FileCacheEntry> | null = null;
   let last: MachineTokens | null = null;
   let running: Promise<MachineTokens> | null = null;
-  let runningForce = false;
+  let queuedForce: Promise<MachineTokens> | null = null;
 
   const load = async () => {
     if (cache) return;
@@ -91,6 +91,15 @@ export function createHostTokenHistory(options: {
     return last;
   };
 
+  const startScan = (force: boolean, retain?: () => { dispose(): unknown }) => {
+    const lease = retain?.();
+    running = scanOnce(force).finally(() => {
+      running = null;
+      lease?.dispose();
+    });
+    return running;
+  };
+
   return {
     async read(input: {
       force?: boolean;
@@ -107,18 +116,22 @@ export function createHostTokenHistory(options: {
       ) {
         return last;
       }
-      if (input.force && running && !runningForce) await running.catch(() => {});
-      if (!running) {
-        runningForce = input.force === true;
-        const lease = input.retain?.();
-        running = scanOnce(input.force === true).finally(() => {
-          running = null;
-          lease?.dispose();
-        });
+      let current = running ?? queuedForce;
+      if (input.force && running) {
+        if (!queuedForce) {
+          queuedForce = running.catch(() => {}).then(() => {
+            queuedForce = null;
+            return startScan(true, input.retain);
+          });
+        }
+        current = queuedForce;
       }
-      const current = running;
+      current ??= startScan(input.force === true, input.retain);
+      if (input.force) return current.catch((error) => {
+        if (last) return last;
+        throw error;
+      });
       if (!last) return current;
-      if (input.force) return current.catch(() => last!);
       // The first scan of a busy machine can take minutes. Hand back what is
       // known rather than hold the server's request open that long.
       current.catch(() => {});

@@ -18,6 +18,7 @@ export interface MachineTokenSlice {
   location: string;
   sourceId?: string;
   cursorRepresentation?: "acp" | "chats" | "missing-acp" | "missing-chats";
+  cursorAcpPresence?: FileScanResult["cursorAcpPresence"];
   fileCount: number;
   daily: Record<string, TokenBucket>;
   observedAt?: string;
@@ -67,8 +68,9 @@ export function slicesFromScan(
       sourceId: real(provider === "cursor" ? cursorSessionLocation(file.path) : file.path),
       ...(provider === "cursor" && isCursorStorePath(file.path) ? {
         cursorRepresentation: file.path.includes("acp-sessions")
-          ? cursorStoreExists(file.path) ? "acp" as const : "missing-acp" as const
+          ? (file.cursorAcpPresence?.present ?? cursorStoreExists(file.path)) ? "acp" as const : "missing-acp" as const
           : cursorStoreExists(file.path) ? "chats" as const : "missing-chats" as const,
+        ...(file.cursorAcpPresence ? { cursorAcpPresence: file.cursorAcpPresence } : {}),
       } : {}),
       fileCount: 1,
       daily: file.daily,
@@ -115,16 +117,28 @@ export function mergeMachineTokens(
   const newer = (a: Choice, b: Choice) => a.at > b.at || (a.at === b.at && (b.source.error || b.slice.retained) && !a.source.error && !a.slice.retained);
   const cursorPriority = { acp: 3, chats: 2, "missing-acp": 1, "missing-chats": 0 };
   for (const group of groups.values()) {
-    const preferredCursor = new Map<string, number>();
+    const acpAbsence = new Map<string, number>();
     for (const { slice } of group) {
-      if (slice.provider !== "cursor" || !slice.cursorRepresentation) continue;
-      const id = slice.sourceId!;
-      preferredCursor.set(id, Math.max(preferredCursor.get(id) ?? -1, cursorPriority[slice.cursorRepresentation]));
+      if (slice.provider !== "cursor" || slice.cursorAcpPresence?.present !== false) continue;
+      const at = Date.parse(slice.cursorAcpPresence.observedAt);
+      if (Number.isFinite(at) && at > 0 && at <= nowMs) acpAbsence.set(slice.sourceId!, Math.max(acpAbsence.get(slice.sourceId!) ?? -Infinity, at));
+    }
+    const priority = (row: Choice) => {
+      const representation = row.slice.cursorRepresentation!;
+      if (representation !== "acp") return cursorPriority[representation];
+      const at = Date.parse(row.slice.cursorAcpPresence?.observedAt ?? "");
+      return Number.isFinite(at) && at > 0 && at <= nowMs && (row.slice.cursorAcpPresence?.present === false || at < (acpAbsence.get(row.slice.sourceId!) ?? -Infinity)) ? cursorPriority["missing-acp"] : cursorPriority.acp;
+    };
+    const preferredCursor = new Map<string, number>();
+    for (const row of group) {
+      if (row.slice.provider !== "cursor" || !row.slice.cursorRepresentation) continue;
+      const id = row.slice.sourceId!;
+      preferredCursor.set(id, Math.max(preferredCursor.get(id) ?? -1, priority(row)));
     }
     const files = new Map<string, Choice>();
     for (const row of group) {
       const id = row.slice.sourceId!;
-      if (row.slice.provider === "cursor" && row.slice.cursorRepresentation && cursorPriority[row.slice.cursorRepresentation] < preferredCursor.get(id)!) continue;
+      if (row.slice.provider === "cursor" && row.slice.cursorRepresentation && priority(row) < preferredCursor.get(id)!) continue;
       const prior = files.get(id);
       if (!prior || newer(row, prior)) files.set(id, row);
     }

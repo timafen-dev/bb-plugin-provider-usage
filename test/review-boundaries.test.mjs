@@ -176,6 +176,122 @@ test("server RPC and CLI forced callers run a cold successor after warm local100
   }
 });
 
+test("later forced host requests share a cold successor after forced100 was already read", { timeout: 5000 }, async (t) => {
+  const { home, dataDir } = await fixture(t);
+  const path = join(home, "codex/sessions/a.jsonl");
+  await codexFile(path, 100);
+  const started = gate(), released = gate();
+  t.after(() => released.release());
+  const passes = [];
+  let leases = 0, disposed = 0;
+  const retain = () => { leases += 1; return { dispose() { disposed += 1; } }; };
+  const history = createHostTokenHistory({ dataDir, computer: "pc", scan: async (options) => {
+    passes.push(options.force);
+    const result = await scanTokenFiles(options);
+    if (passes.length === 1) { started.release(); await released.promise; }
+    return result;
+  } });
+  const first = history.read({ force: true, retain });
+  await started.promise;
+  await codexFile(path, 120);
+  const ordinary = history.read({ retain });
+  const later = [history.read({ force: true, retain }), history.read({ force: true, retain })];
+  await new Promise(setImmediate);
+  released.release();
+  const [old, shared, ...fresh] = await Promise.all([first, ordinary, ...later]);
+  assert.equal(merged(old).machines[0].tokens, 100);
+  assert.equal(merged(shared).machines[0].tokens, 100);
+  for (const answer of fresh) assert.equal(merged(machineTokensSchema.parse(answer)).machines[0].tokens, 120);
+  assert.deepEqual(fresh[0], fresh[1]);
+  assert.deepEqual(passes, [true, true]);
+  assert.equal(leases, 2);
+  assert.equal(disposed, 2);
+});
+
+test("forces arriving during the cold successor queue another shared pass, including cold failure", { timeout: 5000 }, async (t) => {
+  const { home, dataDir: root } = await fixture(t);
+  for (const failSecond of [false, true]) {
+    const dataDir = join(root, String(failSecond));
+    await mkdir(dataDir);
+    const firstStarted = gate(), firstReleased = gate(), secondStarted = gate(), secondReleased = gate();
+    t.after(() => { firstReleased.release(); secondReleased.release(); });
+    let tokens = 100;
+    const passes = [];
+    const history = createHostTokenHistory({ dataDir, computer: "pc", scan: async ({ force }) => {
+      passes.push(force);
+      const pass = passes.length, value = tokens;
+      if (pass === 1) { firstStarted.release(); await firstReleased.promise; }
+      if (pass === 2) {
+        secondStarted.release(); await secondReleased.promise;
+        if (failSecond) throw new Error("synthetic cold failure");
+      }
+      return { files: [{ path: join(home, "codex/sessions/a.jsonl"), provider: "codex", mtimeMs: pass, size: 1, daily: { [dayKey(Date.now())]: bucket(value) }, events: [{ atMs: Date.now(), bucket: bucket(value) }], observedAt: new Date().toISOString() }], daily: {}, sources: ["codex"], changedFiles: 1 };
+    } });
+    const first = history.read({ force: true });
+    await firstStarted.promise;
+    tokens = 120;
+    const second = history.read({ force: true });
+    await new Promise(setImmediate);
+    firstReleased.release();
+    assert.equal(merged(await first).machines[0].tokens, 100);
+    await secondStarted.promise;
+    tokens = 140;
+    const later = [history.read({ force: true }), history.read({ force: true })];
+    assert.equal(merged(await history.read({})).machines[0].tokens, 100);
+    await new Promise(setImmediate);
+    secondReleased.release();
+    assert.equal(merged(await second).machines[0].tokens, failSecond ? 100 : 120);
+    const answers = await Promise.all(later);
+    for (const answer of answers) assert.equal(merged(answer).machines[0].tokens, 140);
+    assert.deepEqual(answers[0], answers[1]);
+    assert.deepEqual(passes, [true, true, true]);
+  }
+});
+
+test("later server RPC and CLI forces share a successor after forced100 and held remote response", { timeout: 10000 }, async (t) => {
+  const { home } = await fixture(t);
+  const path = join(home, "codex/sessions/a.jsonl");
+  await codexFile(path, 100);
+  const readFull = gate(), remoteStarted = gate(), released = gate();
+  let reads = 0;
+  const createReadStream = fs.createReadStream;
+  t.mock.method(fs, "createReadStream", (file, ...args) => {
+    const stream = createReadStream(file, ...args);
+    if (file === path && ++reads === 2) stream.once("end", readFull.release);
+    return stream;
+  });
+  syncBuiltinESMExports();
+  const remoteForces = [];
+  const { bb, harness } = fakeHost({
+    hosts: [{ id: "remote", name: "Remote", status: "connected" }],
+    call: async ({ method, input }) => {
+      assert.equal(method, "tokenHistory");
+      remoteForces.push(input.force);
+      if (remoteForces.length === 1) { remoteStarted.release(); await released.promise; }
+      return { computer: "remote", scannedAt: new Date().toISOString(), changedFiles: 0, slices: [] };
+    },
+  });
+  try {
+    await plugin(bb);
+    const first = harness.behavior.callRpc("getTokens", { days: 7, force: true });
+    await Promise.all([readFull.promise, remoteStarted.promise]);
+    await codexFile(path, 120);
+    const later = harness.behavior.callRpc("getTokens", { days: 7, force: true });
+    const cli = harness.behavior.runCli(["tokens", "--days", "7", "--force", "--json"]);
+    assert.equal((await harness.behavior.callRpc("getTokens", { days: 7, force: false })).totals.tokens, 100);
+    released.release();
+    assert.equal((await first).totals.tokens, 100);
+    assert.equal((await later).totals.tokens, 120);
+    const answer = await cli;
+    assert.equal(answer.exitCode, 0);
+    assert.equal(JSON.parse(answer.stdout).totals.tokens, 120);
+    assert.deepEqual(remoteForces, [true, true]);
+  } finally {
+    released.release();
+    await harness.lifecycle.dispose();
+  }
+});
+
 test("legacy unreadable Claude keyed events remain exactly rebucketable and deduplicated", async (t) => {
   const { home, dataDir } = await fixture(t);
   const now = Date.now(), observedAt = new Date(now - 60_000).toISOString();
