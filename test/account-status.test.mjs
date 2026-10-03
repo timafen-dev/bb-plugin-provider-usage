@@ -406,6 +406,39 @@ test("host RPC failure is unknown and never replaced with another Claude login",
   }
 });
 
+test("account changes invalidate every provider quota across dashboard, accounts CLI and restart", async () => {
+  let accountEmail = "a@example.test", status = "ok";
+  const slice = () => ({ status, accountEmail, planLabel: "Pro", message: status === "ok" ? null : "usage is rate limited", windows: status === "ok" ? [window(41)] : [] });
+  const harness = await setup({
+    readUsageLimits: () => Object.fromEntries(["codex", "claude-code", "acp-cursor", "muse"].map((id) => [id, slice()])),
+    callHostRpc: () => ({ ...slice(), directory: "/synthetic/account" }),
+  });
+  let reloaded;
+  try {
+    const first = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.ok(first.providers.every((row) => row.accountEmail === accountEmail && row.windows[0].usedPercent === 41));
+    accountEmail = "b@example.test";
+    status = "error";
+    for (const hostId of [null, "host-1"]) {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
+      assert.ok(dashboard.providers.every((row) => row.accountEmail === accountEmail && row.status === "error" && row.windows.length === 0));
+    }
+    const accounts = JSON.parse((await harness.behavior.runCli(["accounts", "--machine", "host-1", "--json", "--force"])).stdout);
+    assert.ok(accounts.accounts.every((row) => row.accountEmail === accountEmail && row.windows.length === 0));
+    reloaded = await harness.lifecycle.reload(plugin);
+    const restored = await reloaded.harness.behavior.callRpc("getDashboard", { hostId: null, force: false });
+    assert.ok(restored.providers.every((row) => row.accountEmail === accountEmail && row.windows.length === 0));
+    accountEmail = null;
+    const unknown = await reloaded.harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.ok(unknown.providers.every((row) => row.accountEmail === null && row.windows.length === 0));
+    const text = (await reloaded.harness.behavior.runCli(["--force"])).stdout;
+    assert.doesNotMatch(text, /41%|a@example.test/);
+  } finally {
+    if (reloaded) await reloaded.harness.lifecycle.dispose();
+    await harness.lifecycle.dispose();
+  }
+});
+
 test("last-good quota from one machine is never overlaid onto another", async () => {
   const harness = await setup({
     callHostRpc: ({ hostId }) =>

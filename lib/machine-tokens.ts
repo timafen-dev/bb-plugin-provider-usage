@@ -144,7 +144,7 @@ export function mergeMachineTokens(
       });
       continue;
     }
-    const incompatible = slice.readError === true && slice.events === undefined;
+    const incompatible = slice.readError === true && slice.events === undefined && Object.values(slice.daily).some((bucket) => bucket.tokens > 0);
     const amounts: Record<string, TokenBucket> = slice.events || incompatible ? {} : structuredClone(slice.daily);
     for (const event of slice.events ?? []) add(amounts, event.atMs, event.bucket);
     for (const hit of keyed.values()) if (hit.choice === choice) add(amounts, hit.event.atMs, hit.event.bucket);
@@ -160,7 +160,7 @@ export function mergeMachineTokens(
     totals.set(source, (totals.get(source) ?? 0) + tokens);
     providers.add(slice.provider);
     fileCount += slice.fileCount;
-    const stale = source.error !== null || slice.retained === true || nowMs - choice.at >= MACHINE_TOKENS_FRESH_MS;
+    const stale = source.error !== null || slice.retained === true || slice.readError === true || nowMs - choice.at >= MACHINE_TOKENS_FRESH_MS;
     observations.push({
       machineId: source.id, machineName: source.name, provider: slice.provider,
       sourceId: slice.sourceId ?? slice.location, observedAt: Number.isFinite(choice.at) ? new Date(choice.at).toISOString() : null,
@@ -174,7 +174,7 @@ export function mergeMachineTokens(
     id: source.id, name: source.name,
     status: !source.tokens ? "error" : source.error || source.tokens.slices.some((slice) => {
       const at = Date.parse(slice.observedAt ?? "");
-      return !slice.sourceId || slice.retained || !Number.isFinite(at) || at > nowMs || nowMs - at >= MACHINE_TOKENS_FRESH_MS;
+      return !slice.sourceId || slice.retained || slice.readError || !Number.isFinite(at) || at > nowMs || nowMs - at >= MACHINE_TOKENS_FRESH_MS;
     }) ? "stale" : "ok",
     tokens: totals.get(source) ?? 0,
     message: source.error,

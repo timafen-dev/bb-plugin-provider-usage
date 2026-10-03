@@ -844,6 +844,7 @@ function createTokenStore(bb: BbPluginApi) {
   const readMeta = db.prepare("SELECT value FROM token_meta WHERE key = ?");
 
   let inflight: Promise<TokenSnapshot> | null = null;
+  let inflightForce = false;
   let lastSnapshot: TokenSnapshot | null = null;
 
   const publish = () => {
@@ -1052,8 +1053,13 @@ function createTokenStore(bb: BbPluginApi) {
       },
     });
 
-  const sync = async (days: TokenWindowDays, force = false) => {
-    if (inflight) return inflight;
+  const sync = async (days: TokenWindowDays, force = false): Promise<TokenSnapshot> => {
+    if (inflight) {
+      if (!force || inflightForce) return inflight;
+      await inflight.catch(() => {});
+      return sync(days, true);
+    }
+    inflightForce = force;
     inflight = (async () => {
       const nowMs = Date.now();
       const cached = loadCache;

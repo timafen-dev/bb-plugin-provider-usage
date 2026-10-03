@@ -139,6 +139,26 @@ function renderFigures(input = {}) {
   };
 }
 
+test("private absolute paths never reach Pi presentation or public failure reasons", () => {
+  for (const path of ["/run/user/1000/pi/private-session.jsonl", "D:\\build\\private-session.jsonl", "\\\\server\\share\\private-session.jsonl"]) {
+    for (const mutate of [
+      (snapshot) => { snapshot.warnings = [`unreadable ${path}`]; },
+      (snapshot) => { snapshot.quarantine = [{ [path]: 1 }]; },
+    ]) {
+      const snapshot = structuredClone(fixture);
+      mutate(snapshot);
+      const { html, view } = renderFigures({ text: JSON.stringify(snapshot) });
+      assert.equal(view.status.status, "invalid");
+      assert.ok(!JSON.stringify(view).includes(path));
+      assert.ok(!html.includes("private-session"));
+    }
+    const { html, view } = renderFigures({ extra: { sidecarText: JSON.stringify({ status: "failed", error_class: path }) } });
+    assert.equal(view.status.status, "failed");
+    assert.ok(!JSON.stringify(view).includes(path));
+    assert.ok(!html.includes("private-session"));
+  }
+});
+
 test("contradicted idle coverage never renders affirmative idle badges or wording", () => {
   for (const mutate of [
     (snapshot) => { snapshot.coverage.pending_tails = 1; },

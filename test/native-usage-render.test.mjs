@@ -34,7 +34,7 @@ test("homepage retains rate-limited quota visibly marked Last known", async () =
   const saved = { window: globalThis.window, document: globalThis.document, act: globalThis.IS_REACT_ACT_ENVIRONMENT };
   const prior = normalizeProviderLimits({
     codex: { status: "not_installed", windows: [] },
-    "claude-code": { status: "ok", windows: [{ label: "Weekly limit", usedPercent: 40, resetsAt: null }] },
+    "claude-code": { status: "ok", accountEmail: "a@example.test", windows: [{ label: "Weekly limit", usedPercent: 40, resetsAt: null }] },
     "acp-cursor": { status: "not_installed", windows: [] },
     muse: { status: "not_installed", windows: [] },
   });
@@ -59,6 +59,9 @@ test("homepage retains rate-limited quota visibly marked Last known", async () =
     await renderer.act(async () => { tick(); });
     assert.match(rendered(), /Last known · Weekly limit · 60% left/);
     assert.ok(tree.root.findAllByType("svg").length > 0);
+    limits = overlayLastGoodLimits({ ...refused, claudeCode: { ...refused.claudeCode, accountEmail: "b@example.test" } }, rememberGoodLimits(prior));
+    await renderer.act(async () => { tick(); });
+    assert.doesNotMatch(rendered(), /60% left|Last known/);
     limits = prior;
     await renderer.act(async () => { tick(); });
     assert.doesNotMatch(rendered(), /Last known/);

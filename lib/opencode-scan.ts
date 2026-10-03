@@ -154,7 +154,7 @@ export function scanOpencodeStores(options?: {
   paths?: readonly string[];
   cached?: Map<
     string,
-    { mtimeMs: number; size: number; daily: Record<string, TokenBucket>; events?: { atMs: number; bucket: TokenBucket }[] }
+    { mtimeMs: number; size: number; readError?: boolean; daily: Record<string, TokenBucket>; events?: { atMs: number; bucket: TokenBucket }[] }
   >;
 }): OpencodeFileScan[] {
   const cached = options?.cached ?? new Map();
@@ -167,7 +167,7 @@ export function scanOpencodeStores(options?: {
 
     const prior = cached.get(path);
     if (
-      prior && prior.events &&
+      prior && !prior.readError && prior.events &&
       prior.mtimeMs === fingerprint.mtimeMs &&
       prior.size === fingerprint.size
     ) {

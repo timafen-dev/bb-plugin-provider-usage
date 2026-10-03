@@ -21,6 +21,11 @@ export function hasRateLimitedProvider(
   return PROVIDER_KEYS.some((key) => isRateLimitedSlice(limits[key]));
 }
 
+function accountsCompatible(current: ProviderLimitSlice, prior: ProviderLimitSlice): boolean {
+  const account = current.accountEmail?.trim().toLowerCase();
+  return !account || account === prior.accountEmail?.trim().toLowerCase();
+}
+
 /**
  * Anthropic's OAuth usage endpoint 429s if BB asks too often. Keep the last
  * successful Claude (or any provider) windows instead of blanking the meter.
@@ -34,7 +39,7 @@ export function overlayLastGoodLimits(
   for (const key of PROVIDER_KEYS) {
     const current = next[key];
     const prior = lastGood[key];
-    if (!isRateLimitedSlice(current) || prior?.status !== "ok") continue;
+    if (!isRateLimitedSlice(current) || prior?.status !== "ok" || !accountsCompatible(current, prior)) continue;
     next[key] = {
       ...prior,
       status: "stale",
@@ -54,6 +59,7 @@ export function rememberGoodLimits(
   for (const key of PROVIDER_KEYS) {
     const slice = limits[key];
     if (slice?.status === "ok") next[key] = slice;
+    else if (slice && next[key] && !accountsCompatible(slice, next[key]!)) delete next[key];
   }
   return next;
 }

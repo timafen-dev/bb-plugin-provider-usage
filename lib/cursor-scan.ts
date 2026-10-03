@@ -24,6 +24,7 @@ export interface CursorFileScan {
 }
 
 export interface CursorCacheEntry {
+  readError?: boolean;
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
@@ -356,7 +357,7 @@ export function scanCursorStores(options?: {
     const entry = cached.get(path);
     const prior = entry?.unknownWindow ? { ...entry, daily: { unknown: entry.unknownWindow } } : entry;
     const fingerprintStale =
-      options?.force || !prior ||
+      options?.force || !prior || prior.readError ||
       prior.mtimeMs !== times.mtimeMs ||
       prior.size !== times.size;
 
@@ -374,7 +375,7 @@ export function scanCursorStores(options?: {
       // cache row with totals but no identity is also kept — we just stamp
       // the identity so the next pass can skip the open entirely.
       const nextIdentity = readAcpStoreIdentity(path);
-      if (!options?.force && prior?.daily && identityUnchanged(prior, nextIdentity)) {
+      if (!options?.force && !prior?.readError && prior?.daily && identityUnchanged(prior, nextIdentity)) {
         daily = prior.daily;
         identity = nextIdentity ?? identity;
       } else {

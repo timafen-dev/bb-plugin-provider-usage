@@ -412,7 +412,9 @@ export function unplaceCursor(file: FileScanResult): void {
 function retainedFile(path: string, prior: FileCacheEntry, provider: string, nowMs: number, failed = true): FileScanResult | null {
   let info;
   try { info = statSync(path); } catch { info = null; }
-  if (info && info.mtimeMs < nowMs - NINETY_DAYS_MS) return null;
+  if (provider === "opencode") {
+    if (prior.events && !prior.events.some((event) => event.atMs >= nowMs - NINETY_DAYS_MS)) return null;
+  } else if (info && info.mtimeMs < nowMs - NINETY_DAYS_MS) return null;
   const removed = info === null;
   const unknownWindow = { ...(prior.unknownWindow ?? emptyBucket()) };
   if (removed && !prior.events) for (const bucket of Object.values(prior.daily)) addBucket(unknownWindow, bucket);
@@ -472,7 +474,7 @@ function observedFile(file: FileScanResult, prior: FileCacheEntry | undefined): 
   const retained = file.daily === prior?.daily || (file.unknownWindow !== undefined && prior?.unknownWindow !== undefined && JSON.stringify(file.unknownWindow) === JSON.stringify(prior.unknownWindow));
   return {
     ...file,
-    observedAt: retained ? prior?.observedAt : new Date().toISOString(),
+    observedAt: retained && !prior?.readError ? prior?.observedAt : new Date().toISOString(),
     retained: file.readError === true,
   };
 }
@@ -522,7 +524,7 @@ export async function scanTokenFiles(options?: {
 
       const prior = cached.get(path);
       const stale =
-        options?.force || !prior || !prior.events ||
+        options?.force || !prior || prior.readError || !prior.events ||
         prior.mtimeMs !== Math.round(info.mtimeMs) ||
         prior.size !== info.size;
       let parsed;

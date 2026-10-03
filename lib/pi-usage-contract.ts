@@ -371,8 +371,8 @@ export type PiTaskLabel = PiUsageSnapshot["task_labels"][number];
  * contract describes, so it is refused instead of displayed.
  */
 const PRIVACY_SENTINELS: { id: string; test: RegExp }[] = [
-  { id: "absolute_path", test: /(?:^|[\s"'(:=])(?:~\/|\/(?:home|Users|root|var|tmp|private|etc|opt|mnt|srv)\/)/ },
-  { id: "windows_path", test: /[A-Za-z]:[\\/]{1,2}(?:Users|Documents)/i },
+  { id: "absolute_path", test: /(?:^|[^\w./\\-])(?:~\/|\/[^\s])/ },
+  { id: "windows_path", test: /[A-Za-z]:[\\/]|\\\\[^\s\\]/ },
   { id: "email", test: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
   {
     id: "credential",

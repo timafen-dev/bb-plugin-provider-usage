@@ -137,7 +137,8 @@ test("unreadable host stores retain900 and provenance across refresh and restart
   assert.match(text, /observed .*Last known/);
   assert.match(text, /could not be read/);
   await utimes(path, new Date(Date.now() - 100 * 86400_000), new Date(Date.now() - 100 * 86400_000));
-  assert.equal((await history.read({ force: true })).slices.length, 0);
+  const oldMainFile = await history.read({ force: true });
+  assert.equal(mergeMachineTokens([source("host", oldMainFile)], 7).machines[0].tokens, 900);
 });
 
 test("removed daily-only host cache stays visible with unknown window and unknown age", async (t) => {

@@ -53,6 +53,7 @@ export function createHostTokenHistory(options: {
   let cache: Map<string, FileCacheEntry> | null = null;
   let last: MachineTokens | null = null;
   let running: Promise<MachineTokens> | null = null;
+  let runningForce = false;
 
   const load = async () => {
     if (cache) return;
@@ -106,7 +107,9 @@ export function createHostTokenHistory(options: {
       ) {
         return last;
       }
+      if (input.force && running && !runningForce) await running.catch(() => {});
       if (!running) {
+        runningForce = input.force === true;
         const lease = input.retain?.();
         running = scanOnce(input.force === true).finally(() => {
           running = null;
@@ -115,6 +118,7 @@ export function createHostTokenHistory(options: {
       }
       const current = running;
       if (!last) return current;
+      if (input.force) return current.catch(() => last!);
       // The first scan of a busy machine can take minutes. Hand back what is
       // known rather than hold the server's request open that long.
       current.catch(() => {});

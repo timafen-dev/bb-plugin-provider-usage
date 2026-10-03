@@ -233,7 +233,7 @@ test("host history reuses its parse cache and answers from disk after a restart"
   }
 });
 
-test("host history hands back the last answer while a slow scan continues", async () => {
+test("host warm timeout retains last answer while force awaits a cold successor", async () => {
   const dataDir = await mkdtemp(join(process.cwd(), ".test-host-tokens-"));
   try {
     let release;
@@ -249,20 +249,23 @@ test("host history hands back the last answer while a slow scan continues", asyn
       };
     };
     let disposed = 0;
-    const history = createHostTokenHistory({ dataDir, computer: "pc", scan });
+    let clock = Date.now();
+    const history = createHostTokenHistory({ dataDir, computer: "pc", scan, now: () => clock });
     await history.read({});
+    clock += 5 * 60_000;
     const stale = await history.read({
-      force: true,
       waitMs: 10,
       retain: () => ({ dispose: () => (disposed += 1) }),
     });
     assert.equal(stale.slices[0].daily[today].tokens, 1);
     assert.equal(disposed, 0);
+    const forced = history.read({ force: true, waitMs: 0, retain: () => ({ dispose: () => (disposed += 1) }) });
     release();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(disposed, 1);
+    const cold = await forced;
+    assert.equal(cold.slices[0].daily[today].tokens, 3);
+    assert.equal(disposed, 2);
     const fresh = await history.read({});
-    assert.equal(fresh.slices[0].daily[today].tokens, 2);
+    assert.equal(fresh.slices[0].daily[today].tokens, 3);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
