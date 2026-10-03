@@ -12,11 +12,11 @@ registerHooks({ resolve(specifier, context, next) {
     throw error;
   }
 } });
-const { scanTokenFiles, seedDailyFromCache } = await import("../lib/token-scan.ts");
+const { scanTokenFiles, seedDailyFromCache, selectCursorFiles, dailyFromFiles } = await import("../lib/token-scan.ts");
 const { scanCursorStores } = await import("../lib/cursor-scan.ts");
 const { createHostTokenHistory } = await import("../lib/host-token-history.ts");
 const { slicesFromScan, mergeMachineTokens } = await import("../lib/machine-tokens.ts");
-const { dayKey } = await import("../lib/tokens.ts");
+const { dayKey, assembleTokenSnapshot, formatTokenText, formatTokenCount } = await import("../lib/tokens.ts");
 const bucket = (tokens) => ({ tokens, input: tokens, output: 0, cached: 0, reasoning: 0, turns: 1 });
 
 async function fixture(t) {
@@ -184,5 +184,127 @@ test("Cursor retention matches scanner expiry for both stores and preserves fail
     const recovered = await scanTokenFiles({ cached, force: true, nowMs: now });
     assert.equal(recovered.files.length, admitted ? 2 : 0);
     for (const file of recovered.files) assert.equal(file.readError, undefined);
+  }
+});
+
+test("competing chats8100 cannot replace inaccessible ACP8120 across refresh, paint and restart", async (t) => {
+  const { home, dataDir } = await fixture(t);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const chats = join(home, ".cursor/chats/W/S/store.db"), acp = join(home, ".cursor/acp-sessions/S/store.db");
+  const createStore = async (path, output) => {
+    await fsPromises.mkdir(join(path, ".."), { recursive: true });
+    const db = new DatabaseSync(path);
+    db.exec("create table blobs (data blob)");
+    const insert = db.prepare("insert into blobs values (?)");
+    insert.run(Buffer.from(JSON.stringify({ role: "user", content: "hi", providerOptions: { cursor: { requestId: "request" } } })));
+    insert.run(Buffer.from(JSON.stringify({ role: "assistant", content: "x".repeat(output * 3.6) })));
+    db.close();
+  };
+  const history = createHostTokenHistory({ dataDir, computer: "pc" });
+  await createStore(chats, 100);
+  const first = await history.read({ force: true });
+  assert.equal(first.slices[0].unknownWindow.tokens, 8100);
+  const chatsCache = JSON.parse(await fsPromises.readFile(join(dataDir, "token-cache.json"), "utf8"))[0][1];
+  t.mock.timers.tick(60_000);
+  await createStore(acp, 120);
+  const second = await history.read({ force: true });
+  assert.equal(second.slices.length, 1);
+  assert.equal(second.slices[0].unknownWindow.tokens, 8120);
+  const cached = new Map(JSON.parse(await fsPromises.readFile(join(dataDir, "token-cache.json"), "utf8")));
+  assert.deepEqual([...cached.keys()], [acp]);
+  const statSync = fs.statSync, existsSync = fs.existsSync;
+  let code;
+  t.mock.method(fs, "statSync", (path, ...args) => {
+    if (path === acp) throw Object.assign(new Error("synthetic inaccessible ACP"), { code });
+    return statSync(path, ...args);
+  });
+  t.mock.method(fs, "existsSync", (path) => path === acp ? false : existsSync(path));
+  syncBuiltinESMExports();
+  for (code of ["EACCES", "EPERM", "EIO"]) {
+    t.mock.timers.tick(60_000);
+    assert.equal(scanCursorStores({ cached }).at(0).path, chats);
+    const scan = await scanTokenFiles({ cached, force: true });
+    assert.deepEqual(scan.files.map((file) => file.path), [acp]);
+    const expected = [{ ...second.slices[0], retained: true, readError: true }];
+    assert.deepEqual(slicesFromScan(scan), expected);
+    const paint = { files: [{ ...chatsCache, path: chats }], daily: {}, sources: ["cursor"] };
+    seedDailyFromCache(paint.daily, paint.sources, cached, "cursor", paint.files);
+    assert.deepEqual(paint.files.map((file) => file.path), [acp]);
+    assert.deepEqual(slicesFromScan(paint), expected);
+    assert.deepEqual(paint.daily, {});
+    const retained = await history.read({ force: true });
+    assert.deepEqual(retained.slices, expected);
+    const persisted = JSON.parse(await fsPromises.readFile(join(dataDir, "token-cache.json"), "utf8"));
+    assert.deepEqual(persisted.map(([path]) => path), [acp]);
+    assert.equal(persisted[0][1].unknownWindow.tokens, 8120);
+    assert.equal(persisted[0][1].observedAt, second.slices[0].observedAt);
+    assert.equal(persisted[0][1].readError, true);
+    const restarted = createHostTokenHistory({ dataDir, computer: "pc" });
+    assert.deepEqual((await restarted.read({})).slices, expected);
+    const refreshed = await restarted.read({ force: true });
+    assert.deepEqual(refreshed.slices, expected);
+    const merged = mergeMachineTokens([{ id: "host", name: "Host", error: null, tokens: refreshed }], 7);
+    assert.equal(merged.observations.length, 1);
+    assert.equal(merged.observations[0].unknownWindow, 8120);
+    assert.equal(merged.observations[0].rawTokens, 8120);
+    assert.equal(merged.observations[0].observedAt, second.slices[0].observedAt);
+    assert.equal(merged.observations[0].status, "stale");
+    const text = formatTokenText({ ...assembleTokenSnapshot({ days: 7, fileCount: 1, changedFiles: 0, sources: merged.providers, daily: merged.daily }), observations: merged.observations });
+    assert.ok(text.includes(`Last known ${formatTokenCount(8120)} · unknown window`));
+    assert.ok(text.includes(`observed ${second.slices[0].observedAt}`));
+    assert.match(text, /could not be read/);
+  }
+  t.mock.restoreAll();
+  syncBuiltinESMExports();
+  const recovered = await history.read({ force: true });
+  assert.equal(recovered.slices.length, 1);
+  assert.equal(recovered.slices[0].unknownWindow.tokens, 8120);
+  assert.equal(recovered.slices[0].readError, undefined);
+  assert.equal(recovered.slices[0].retained, false);
+});
+
+test("Cursor selection distinguishes proven absence in either direction and cache representation", async (t) => {
+  const { home } = await fixture(t);
+  const chats = join(home, ".cursor/chats/W/S/store.db"), acp = join(home, ".cursor/acp-sessions/S/store.db");
+  for (const path of [chats, acp]) {
+    await fsPromises.mkdir(join(path, ".."), { recursive: true });
+    await fsPromises.writeFile(path, "store");
+  }
+  const statSync = fs.statSync;
+  let faults = new Map();
+  t.mock.method(fs, "statSync", (path, ...args) => {
+    if (faults.get(path)) throw Object.assign(new Error("synthetic source stat failure"), { code: faults.get(path) });
+    return statSync(path, ...args);
+  });
+  syncBuiltinESMExports();
+  const cases = [[null, null, acp], ["ENOENT", null, chats], ["ENOTDIR", null, chats], [null, "ENOENT", acp], [null, "ENOTDIR", acp], ["ENOENT", "ENOTDIR", acp]];
+  for (const code of ["EACCES", "EPERM", "EIO"]) cases.push([code, null, acp], [null, code, acp], [code, code, acp], [code, "ENOENT", acp], ["ENOENT", code, chats]);
+  const now = Date.now(), observedAt = new Date(now - 60_000).toISOString();
+  for (const [acpCode, chatsCode, chosen] of cases) {
+    faults = new Map([[acp, acpCode], [chats, chatsCode]]);
+    for (const legacy of [false, true]) {
+      const files = [[chats, 8100], [acp, 8120]].map(([path, tokens]) => ({
+        path, provider: "cursor", observedAt, mtimeMs: now, birthMs: now - 1000, size: 1,
+        ...(legacy ? { daily: { [dayKey(now)]: bucket(tokens) } } : { daily: {}, unknownWindow: bucket(tokens) }),
+      }));
+      for (const rows of [files, [...files].reverse()]) {
+        const prior = structuredClone(rows);
+        const selected = selectCursorFiles(rows);
+        assert.deepEqual(selected.map((file) => file.path), [chosen]);
+        assert.deepEqual(rows, prior);
+        const tokens = chosen === acp ? 8120 : 8100;
+        assert.deepEqual(dailyFromFiles(rows), legacy ? { [dayKey(now)]: { cursor: bucket(tokens) } } : {});
+        const slices = slicesFromScan({ files: rows, daily: {} });
+        assert.equal(slices.length, 1);
+        assert.equal(slices[0].unknownWindow.tokens, tokens);
+        assert.equal(slices[0].observedAt, observedAt);
+        const paint = { files: [], daily: {}, sources: [] };
+        seedDailyFromCache(paint.daily, paint.sources, rows.map(({ path, ...entry }) => [path, entry]), "cursor", paint.files);
+        assert.deepEqual(paint.files.map((file) => file.path), [chosen]);
+        assert.equal(paint.files[0].unknownWindow.tokens, tokens);
+        assert.equal(paint.files[0].observedAt, observedAt);
+        assert.deepEqual(paint.daily, {});
+      }
+    }
   }
 });

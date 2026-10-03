@@ -440,7 +440,12 @@ export function selectCursorFiles(files: FileScanResult[]): FileScanResult[] {
     if (!isCursorStorePath(file.path)) continue;
     const key = cursorSessionLocation(file.path);
     const prior = selected.get(key);
-    const exists = (path: string) => { try { return statSync(path).isFile(); } catch { return false; } };
+    const exists = (path: string) => {
+      try { return statSync(path).isFile(); } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        return code !== "ENOENT" && code !== "ENOTDIR";
+      }
+    };
     if (!prior || (exists(file.path) && !exists(prior.path)) || (exists(file.path) === exists(prior.path) && !prior.path.includes("acp-sessions") && file.path.includes("acp-sessions"))) selected.set(key, file);
   }
   return files.filter((file) => !isCursorStorePath(file.path) || selected.get(cursorSessionLocation(file.path)) === file);
