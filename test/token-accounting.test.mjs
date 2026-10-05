@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import test from "node:test";
-import { tmpdir } from "node:os";
+const tmpdir = () => process.cwd();
 import { join } from "node:path";
 
 // The plugin uses bundler-style extensionless TypeScript imports. Let Node's
@@ -337,6 +337,7 @@ test("seedDailyFromCache paints cursor/opencode without double-counting", () => 
   const today = dayKey(Date.now());
   const daily = {};
   const sources = [];
+  const files = [];
   const cached = new Map([
     [
       "/tmp/.cursor/acp-sessions/ses/store.db",
@@ -370,14 +371,17 @@ test("seedDailyFromCache paints cursor/opencode without double-counting", () => 
     ],
   ]);
 
-  assert.equal(seedDailyFromCache(daily, sources, cached, "cursor"), 1);
-  assert.equal(seedDailyFromCache(daily, sources, cached, "opencode"), 1);
+  assert.equal(seedDailyFromCache(daily, sources, cached, "cursor", files), 1);
+  assert.equal(seedDailyFromCache(daily, sources, cached, "opencode", files), 1);
   assert.deepEqual(sources, ["cursor", "opencode"]);
-  assert.equal(daily[today]?.cursor.tokens, 311);
-  assert.equal(daily[today]?.opencode.tokens, 4_800);
+  assert.deepEqual(daily, {});
+  assert.equal(files.find((file) => file.provider === "cursor").unknownWindow.tokens, 311);
+  assert.equal(files.find((file) => file.provider === "opencode").unknownWindow.tokens, 4_800);
+  assert.equal(files.length, 2);
+  assert.ok(files.every((file) => file.retained && file.observedAt === undefined));
 
-  assert.equal(seedDailyFromCache(daily, sources, cached, "cursor"), 0);
-  assert.equal(daily[today]?.cursor.tokens, 311);
+  assert.equal(seedDailyFromCache(daily, sources, cached, "cursor", files), 0);
+  assert.deepEqual(daily, {});
 });
 
 test("opencode store scan aggregates json_extract scalars by day", async () => {

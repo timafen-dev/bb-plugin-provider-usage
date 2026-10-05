@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { registerHooks } from "node:module";
 import test from "node:test";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
@@ -77,11 +79,13 @@ function claudeResult(hostId) {
 async function setup({
   callHostRpc = ({ hostId }) => claudeResult(hostId),
   readUsageLimits = ({ hostId } = {}) => usageLimits(hostId),
+  primaryHostId = "host-1",
+  listedHosts = hosts,
 } = {}) {
   const { bb, harness } = createFakePluginHost({
     pluginId: "provider-usage",
     sdk: {
-      hosts: { list: async () => hosts },
+      hosts: { list: async () => listedHosts },
       providers: {
         list: async () => [
           { id: "codex", displayName: "Codex", logoUrl: null },
@@ -89,6 +93,7 @@ async function setup({
         ],
       },
       system: {
+        config: async () => ({ primaryHostId }),
         usageLimits: async (input) => readUsageLimits(input),
       },
     },
@@ -97,6 +102,208 @@ async function setup({
   await plugin(bb);
   return harness;
 }
+
+test("implicit dashboard and CLI limits follow the primary machine", async () => {
+  const asked = [];
+  const harness = await setup({
+    primaryHostId: "host-2",
+    readUsageLimits: ({ hostId } = {}) => ({ ...usageLimits(hostId), codex: emptyProvider }),
+    callHostRpc: ({ hostId, method }) => {
+      if (method === "claudeUsage") asked.push(hostId);
+      return claudeResult(hostId);
+    },
+  });
+  try {
+    const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    const claude = dashboard.providers.find((row) => row.key === "claudeCode");
+    assert.equal(claude.accountEmail, "claude-two@example.test");
+    const result = await harness.behavior.runCli(["--json", "--force"]);
+    assert.equal(JSON.parse(result.stdout).providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+    assert.deepEqual(asked, ["host-2", "host-2"]);
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("implicit Claude reads refuse an unavailable primary source", async () => {
+  for (const primaryHostId of [null, "host-2"]) {
+    const harness = await setup({
+      primaryHostId,
+      readUsageLimits: ({ hostId } = {}) => ({ ...usageLimits(hostId), codex: emptyProvider }),
+      callHostRpc: () => { throw new Error("unavailable"); },
+    });
+    try {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+      const claude = dashboard.providers.find((row) => row.key === "claudeCode");
+      assert.equal(claude.status, "unknown");
+      assert.equal(claude.accountEmail, null);
+      assert.deepEqual(claude.windows, []);
+    } finally {
+      await harness.lifecycle.dispose();
+    }
+  }
+});
+
+test("a hidden primary is not replaced by the first visible peer", async () => {
+  const harness = await setup();
+  try {
+    await harness.behavior.setSettings({ panelHidden: "PC 1" });
+    for (const hostId of [null, "host-1"]) {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
+      assert.deepEqual(dashboard.providers, []);
+      assert.deepEqual(dashboard.hosts.map((host) => host.id), ["host-2"]);
+      assert.equal(dashboard.totals.tightest, null);
+    }
+    const visible = await harness.behavior.callRpc("getDashboard", { hostId: "host-2", force: true });
+    assert.equal(visible.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("explicit hidden requests never substitute a visible primary", async (t) => {
+  const home = await mkdtemp(join(process.cwd(), ".test-account-home-"));
+  const saved = { ...process.env };
+  t.after(async () => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+    await rm(home, { recursive: true, force: true });
+  });
+  Object.assign(process.env, {
+    HOME: home, CODEX_HOME: join(home, "codex"), CLAUDE_CONFIG_DIR: join(home, "claude"),
+    MUSE_HOME: join(home, "muse"), XDG_DATA_HOME: join(home, ".local", "share"),
+  });
+  const asked = [];
+  const harness = await setup({
+    readUsageLimits: ({ hostId } = {}) => {
+      asked.push(hostId);
+      return { ...usageLimits(hostId), codex: emptyProvider };
+    },
+  });
+  try {
+    await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.deepEqual(asked, ["host-1"]);
+    await harness.behavior.setSettings({ panelHidden: "PC 2" });
+    for (const force of [false, true]) {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: "host-2", force });
+      assert.equal(dashboard.hostId, "host-2");
+      assert.deepEqual(dashboard.providers, []);
+      assert.equal(dashboard.totals.trackedProviders, 0);
+    }
+    const json = await harness.behavior.runCli(["--machine", "host-2", "--json"]);
+    assert.deepEqual(JSON.parse(json.stdout).providers, []);
+    assert.equal(JSON.parse(json.stdout).hostId, "host-2");
+    const text = await harness.behavior.runCli(["--machine", "host-2", "--force"]);
+    assert.match(text.stdout, /Usage · Selected machine/);
+    assert.doesNotMatch(text.stdout.split("Token usage ·")[0], /PC 1|claude-one/);
+    assert.deepEqual(asked, ["host-1"]);
+    const primary = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.equal(primary.hostId, "host-1");
+    assert.equal(primary.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-one@example.test");
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("no paired machines retains the implicit native presentation", async () => {
+  const harness = await setup({
+    listedHosts: [], primaryHostId: null,
+    readUsageLimits: () => ({
+      codex: emptyProvider, "claude-code": emptyProvider, "acp-cursor": emptyProvider,
+      muse: { status: "ok", windows: [window(40)] },
+    }),
+  });
+  try {
+    const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.deepEqual(dashboard.hosts, []);
+    assert.equal(dashboard.providers.find((row) => row.key === "muse").status, "ok");
+    assert.equal(dashboard.totals.cumulativeRemainingPercent, 60);
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("hiding an unrelated machine preserves implicit primary ownership", async () => {
+  const harness = await setup({
+    primaryHostId: "host-2",
+    listedHosts: [...hosts, { id: "host-3", name: "PC 3", status: "connected" }],
+    readUsageLimits: ({ hostId } = {}) => ({ ...usageLimits(hostId), codex: emptyProvider }),
+  });
+  try {
+    await harness.behavior.setSettings({ panelHidden: "PC 3" });
+    const dashboard = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.equal(dashboard.hostId, "host-2");
+    assert.equal(dashboard.providers.find((row) => row.key === "claudeCode").accountEmail, "claude-two@example.test");
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("provider omissions apply to implicit and explicit rows and totals", async () => {
+  const harness = await setup({
+    primaryHostId: "host-2",
+    readUsageLimits: () => ({
+      codex: emptyProvider,
+      "claude-code": emptyProvider,
+      "acp-cursor": emptyProvider,
+      muse: { status: "ok", windows: [window(40)] },
+    }),
+  });
+  try {
+    for (const rule of ["PC 2: claude-code", "host-2: claudeCode", "*: claude-code"]) {
+      await harness.behavior.setSettings({ panelHidden: rule });
+      for (const hostId of [null, "host-2"]) {
+        const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
+        assert.ok(dashboard.providers.every((row) => row.key !== "claudeCode"));
+        assert.equal(dashboard.totals.cumulativeRemainingPercent, 60);
+        assert.equal(dashboard.totals.tightest.providerId, "muse");
+        assert.equal(dashboard.totals.windowCount, 1);
+      }
+    }
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("offline and failed account fallbacks honour provider omissions", async () => {
+  for (const mode of ["offline", "failed"]) {
+    const harness = await setup({
+      listedHosts: hosts.map((host) => host.id === "host-2" && mode === "offline" ? { ...host, status: "disconnected" } : host),
+      readUsageLimits: () => { throw new Error("source unavailable"); },
+    });
+    try {
+      await harness.behavior.setSettings({ panelHidden: "PC 2: claude-code" });
+      const result = await harness.behavior.runCli(["accounts", "--machine", "host-2", "--json", "--force"]);
+      const accounts = JSON.parse(result.stdout).accounts;
+      assert.deepEqual(accounts.map((row) => [row.providerId, row.status]), [["codex", "unknown"]]);
+      await harness.behavior.setSettings({ panelHidden: "PC 2: claudeCode\n*: codex" });
+      const empty = await harness.behavior.runCli(["accounts", "--machine", "host-2", "--json", "--force"]);
+      assert.deepEqual(JSON.parse(empty.stdout).accounts, []);
+    } finally {
+      await harness.lifecycle.dispose();
+    }
+  }
+});
+
+test("hiding all paired machines yields no limits or totals", async () => {
+  const harness = await setup({
+    readUsageLimits: () => { throw new Error("hidden machine was asked"); },
+    callHostRpc: () => { throw new Error("hidden machine was asked"); },
+  });
+  try {
+    await harness.behavior.setSettings({ panelHidden: "PC 1\nPC 2" });
+    for (const hostId of [null, "host-1", "host-2"]) {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
+      assert.deepEqual(dashboard.hosts, []);
+      assert.deepEqual(dashboard.providers, []);
+      assert.equal(dashboard.totals.tightest, null);
+    }
+    const cli = await harness.behavior.runCli(["--json", "--force"]);
+    assert.deepEqual(JSON.parse(cli.stdout).providers, []);
+  } finally {
+    await harness.lifecycle.dispose();
+  }
+});
 
 test("accounts CLI keeps four machine/provider identities and quota0 separate", async () => {
   const harness = await setup();
@@ -115,7 +322,7 @@ test("accounts CLI keeps four machine/provider identities and quota0 separate", 
     assert.equal(byKey["host-2:claude-code"].status, "ok");
     assert.equal(byKey["host-2:codex"].credits, null);
     assert.equal(byKey["host-2:codex"].resetCredits, null);
-    assert.equal(byKey["host-2:codex"].enrichmentScope, "primary-only");
+    assert.equal(byKey["host-2:codex"].enrichmentScope, "owning-host");
 
     const reloaded = await harness.lifecycle.reload(plugin);
     const repeated = await reloaded.harness.behavior.runCli([
@@ -195,6 +402,39 @@ test("host RPC failure is unknown and never replaced with another Claude login",
     assert.equal(claude.accountEmail, null);
     assert.deepEqual(claude.windows, []);
   } finally {
+    await harness.lifecycle.dispose();
+  }
+});
+
+test("account changes invalidate every provider quota across dashboard, accounts CLI and restart", async () => {
+  let accountEmail = "a@example.test", status = "ok";
+  const slice = () => ({ status, accountEmail, planLabel: "Pro", message: status === "ok" ? null : "usage is rate limited", windows: status === "ok" ? [window(41)] : [] });
+  const harness = await setup({
+    readUsageLimits: () => Object.fromEntries(["codex", "claude-code", "acp-cursor", "muse"].map((id) => [id, slice()])),
+    callHostRpc: () => ({ ...slice(), directory: "/synthetic/account" }),
+  });
+  let reloaded;
+  try {
+    const first = await harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.ok(first.providers.every((row) => row.accountEmail === accountEmail && row.windows[0].usedPercent === 41));
+    accountEmail = "b@example.test";
+    status = "error";
+    for (const hostId of [null, "host-1"]) {
+      const dashboard = await harness.behavior.callRpc("getDashboard", { hostId, force: true });
+      assert.ok(dashboard.providers.every((row) => row.accountEmail === accountEmail && row.status === "error" && row.windows.length === 0));
+    }
+    const accounts = JSON.parse((await harness.behavior.runCli(["accounts", "--machine", "host-1", "--json", "--force"])).stdout);
+    assert.ok(accounts.accounts.every((row) => row.accountEmail === accountEmail && row.windows.length === 0));
+    reloaded = await harness.lifecycle.reload(plugin);
+    const restored = await reloaded.harness.behavior.callRpc("getDashboard", { hostId: null, force: false });
+    assert.ok(restored.providers.every((row) => row.accountEmail === accountEmail && row.windows.length === 0));
+    accountEmail = null;
+    const unknown = await reloaded.harness.behavior.callRpc("getDashboard", { hostId: null, force: true });
+    assert.ok(unknown.providers.every((row) => row.accountEmail === null && row.windows.length === 0));
+    const text = (await reloaded.harness.behavior.runCli(["--force"])).stdout;
+    assert.doesNotMatch(text, /41%|a@example.test/);
+  } finally {
+    if (reloaded) await reloaded.harness.lifecycle.dispose();
     await harness.lifecycle.dispose();
   }
 });

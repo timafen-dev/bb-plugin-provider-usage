@@ -396,6 +396,10 @@ function buildTotals(providers: ProviderUsage[]): UsageTotals {
   };
 }
 
+export function providerIsOmitted(key: ProviderKey, omitted: ReadonlySet<string>): boolean {
+  return omitted.has(key.toLowerCase()) || omitted.has(PROVIDER_META[key].id);
+}
+
 export function assembleDashboard(input: {
   limits: Record<ProviderKey, ProviderLimitSlice>;
   supplements?: Partial<Record<ProviderKey, ProviderSupplement>>;
@@ -403,6 +407,7 @@ export function assembleDashboard(input: {
   catalog: readonly ProviderCatalogEntry[];
   hostId: string | null;
   fetchedAt?: string;
+  omittedProviders?: ReadonlySet<string>;
 }): DashboardSnapshot {
   /**
    * A provider that is neither installed nor registered on this host is not a
@@ -413,6 +418,7 @@ export function assembleDashboard(input: {
    * news for those.
    */
   const trackedKeys = PROVIDER_KEYS.filter((key) => {
+    if (input.omittedProviders && providerIsOmitted(key, input.omittedProviders)) return false;
     const slice = input.limits[key];
     if (slice === undefined) return false;
     return slice.status !== "not_installed" || isRegistered(key, input.catalog);
@@ -455,8 +461,7 @@ export function assembleDashboard(input: {
 export function formatDashboardText(snapshot: DashboardSnapshot): string {
   const host =
     snapshot.hosts.find((row) => row.id === snapshot.hostId)?.name ??
-    snapshot.hosts[0]?.name ??
-    "Primary machine";
+    (snapshot.hostId === null ? "Primary machine" : "Selected machine");
 
   const lines = [
     `Usage · ${host}`,
@@ -496,7 +501,7 @@ export function formatDashboardText(snapshot: DashboardSnapshot): string {
     lines.push(bits.join(" · "));
     if (provider.status !== "ok") {
       lines.push(`  ${statusLabel(provider.status)}${provider.message ? ` — ${provider.message}` : ""}`);
-      continue;
+      if (provider.status !== "stale") continue;
     }
     if (provider.windows.length === 0) {
       lines.push("  No subscription windows reported");

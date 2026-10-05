@@ -19,6 +19,8 @@ import {
   PROVIDER_KEYS,
   assembleDashboard,
   formatDashboardText,
+  providerIsOmitted,
+  PROVIDER_META,
   type DashboardSnapshot,
   type ProviderKey,
   type ProviderLimitSlice,
@@ -62,7 +64,6 @@ import {
 import { createLocalThroughputScanner } from "./lib/local-throughput-scan";
 import { createOpencodeLiveThroughputSource } from "./lib/opencode-scan";
 import { createCursorLiveThroughputSource } from "./lib/cursor-scan";
-import { readCodexUsageSupplement } from "./lib/codex-usage";
 import {
   hasRateLimitedProvider,
   overlayLastGoodLimits,
@@ -70,6 +71,8 @@ import {
   shouldReuseCachedLimits,
 } from "./lib/limits-cache";
 import { normalizeProviderLimits } from "./lib/provider-limits";
+import { piReadingSchema } from "./lib/pi-usage-contract";
+import { createPiUsageReader } from "./lib/pi-usage-poll";
 
 const usageWindowSchema = z.object({
   label: z.string(),
@@ -198,6 +201,11 @@ const tokenSnapshotSchema = z.object({
       byProvider: z.record(z.string(), z.number()),
     }),
   ),
+  observations: z.array(z.object({
+    machineId: z.string(), machineName: z.string(), provider: z.string(),
+    sourceId: z.string(), observedAt: z.string().nullable(), status: z.enum(["ok", "stale"]),
+    tokens: z.number(), unknownWindow: z.number(), rawTokens: z.number(), historicalAggregate: z.boolean().optional(), birthMs: z.number().nullable(), mtimeMs: z.number().nullable(), message: z.string().nullable(),
+  })).optional(),
   machines: z
     .array(
       z.object({
@@ -277,6 +285,21 @@ export const rpcContract = defineRpcContract({
   getThroughput: {
     input: z.null(),
     output: throughputSnapshotSchema,
+  },
+  /**
+   * One read of the Firstmate Pi snapshot, as a separate source.
+   *
+   * The input is `null` on purpose: there is no path, root, command or machine
+   * selector a caller may supply, because the location is compiled into
+   * `lib/pi-usage-source.ts` and the owning machine is chosen by the server
+   * from its own approved list. Nothing here touches the native datasets — Pi
+   * figures are never added to BB totals and never read as subscription
+   * consumption. This RPC is request-driven: the mounted page owns polling,
+   * with no server timer or background Pi service.
+   */
+  getExternalPiUsage: {
+    input: z.null(),
+    output: piReadingSchema,
   },
 });
 
@@ -365,7 +388,7 @@ function createLimitStore(bb: BbPluginApi) {
     const key = hostKey(hostId);
     const existing = states.get(key);
     if (existing) return existing;
-    const restored = readJson<HostLimitState>(`host-v2:${key}`) ?? {
+    const restored = readJson<HostLimitState>(`${hostId === null ? "host-v3" : "host-v2"}:${key}`) ?? {
       lastGood: {},
       lastFetch: null,
     };
@@ -375,7 +398,7 @@ function createLimitStore(bb: BbPluginApi) {
   };
 
   const persist = (hostId: string | null, state: HostLimitState) => {
-    write.run(`host-v2:${hostKey(hostId)}`, JSON.stringify(state));
+    write.run(`${hostId === null ? "host-v3" : "host-v2"}:${hostKey(hostId)}`, JSON.stringify(state));
   };
 
   const claudeHost = bb.hosts.experimental_client({ contract: hostContract });
@@ -394,10 +417,9 @@ function createLimitStore(bb: BbPluginApi) {
    */
   const claudeForHost = async (
     hostId: string | null,
-    fallback: ProviderLimitSlice,
   ): Promise<ProviderLimitSlice> => {
-    if (hostId === null) return fallback;
     try {
+      if (hostId === null) throw new Error("Primary machine is unavailable.");
       const own = await claudeHost.call("claudeUsage", null, { hostId });
       return {
         status: own.status,
@@ -426,7 +448,7 @@ function createLimitStore(bb: BbPluginApi) {
     const state = stateFor(hostId);
     const raw = await bb.sdk.system.usageLimits(hostId ? { hostId } : {});
     const fresh = normalizeProviderLimits(raw);
-    fresh.claudeCode = await claudeForHost(hostId, fresh.claudeCode);
+    fresh.claudeCode = await claudeForHost(hostId);
     const limits = overlayLastGoodLimits(fresh, state.lastGood);
     state.lastGood = rememberGoodLimits(limits, state.lastGood);
     state.lastFetch = {
@@ -446,6 +468,9 @@ function createLimitStore(bb: BbPluginApi) {
   };
 
   const get = async (hostId: string | null, force = false) => {
+    if (hostId === null) {
+      hostId = (await bb.sdk.system.config().catch(() => null))?.primaryHostId ?? null;
+    }
     const key = hostKey(hostId);
     stateFor(hostId);
     const cached = fetchedByHost.get(key);
@@ -491,38 +516,43 @@ async function loadDashboard(
   // Hidden machines go before anything else: the panel walks this list to
   // decide which sections to draw, so a machine left in it is a section.
   const hosts = everyHost.filter((host) => !isMachineHidden(hidden, host));
-  const resolvedHostId =
-    hostId && hosts.some((host) => host.id === hostId) ? hostId : null;
+  const resolvedHostId = hostId ??
+    (await bb.sdk.system.config().catch(() => null))?.primaryHostId ?? null;
+  const owner = everyHost.find((host) => host.id === resolvedHostId) ?? null;
+  if ((hostId !== null && !hosts.some((host) => host.id === hostId)) ||
+      (everyHost.length > 0 && hosts.length === 0) ||
+      (owner !== null && isMachineHidden(hidden, owner))) {
+    return assembleDashboard({
+      limits: Object.fromEntries<ProviderLimitSlice>(PROVIDER_KEYS.map((key) =>
+        [key, { status: "not_installed", windows: [] }],
+      )) as Record<ProviderKey, ProviderLimitSlice>,
+      hosts,
+      catalog: [],
+      hostId: resolvedHostId,
+    });
+  }
+  const omitted = hiddenProvidersFor(hidden, owner);
   const [slices, catalog] = await Promise.all([
     limitsStore.get(resolvedHostId, force),
     bb.sdk.providers.list(resolvedHostId ? { hostId: resolvedHostId } : {}),
   ]);
 
   const codexSupplement =
-    resolvedHostId === null && slices.codex.status === "ok"
-      ? await readCodexUsageSupplement()
+    resolvedHostId !== null && slices.codex.status === "ok" && slices.codex.accountEmail && !providerIsOmitted("codex", omitted)
+      ? await bb.hosts.experimental_client({ contract: hostContract })
+        .call("claudeUsage", { codexAccountEmail: slices.codex.accountEmail }, { hostId: resolvedHostId })
+        .then((own) => own.codexSupplement ?? null)
+        .catch(() => null)
       : null;
 
-  const snapshot = assembleDashboard({
+  return assembleDashboard({
     limits: slices,
+    omittedProviders: omitted,
     supplements: codexSupplement ? { codex: codexSupplement } : undefined,
     hosts,
     catalog,
     hostId: resolvedHostId,
   });
-  const omitted = hiddenProvidersFor(
-    hidden,
-    hosts.find((host) => host.id === resolvedHostId) ?? null,
-  );
-  if (omitted.size === 0) return snapshot;
-  return {
-    ...snapshot,
-    providers: snapshot.providers.filter(
-      (provider) =>
-        !omitted.has(provider.id.toLowerCase()) &&
-        !omitted.has(provider.key.toLowerCase()),
-    ),
-  };
 }
 
 type AccountReadback = {
@@ -540,7 +570,7 @@ type AccountReadback = {
     windows: DashboardSnapshot["providers"][number]["windows"];
     credits: DashboardSnapshot["providers"][number]["credits"];
     resetCredits: DashboardSnapshot["providers"][number]["resetCredits"];
-    enrichmentScope: "primary-only" | null;
+    enrichmentScope: "owning-host" | null;
     checkedAt: string;
   }>;
 };
@@ -570,14 +600,17 @@ async function loadAccountReadback(
 
   const accounts = await Promise.all(
     hosts.map(async (host) => {
+      const omitted = hiddenProvidersFor(hidden, host);
       const unknownAccounts = (message: string) =>
-        (["codex", "claude-code"] as const).map((providerId) => ({
-          key: `${host.id}:${providerId}`,
+        (["codex", "claudeCode"] as const)
+        .filter((key) => !providerIsOmitted(key, omitted))
+        .map((key) => ({
+          key: `${host.id}:${PROVIDER_META[key].id}`,
           machineId: host.id,
           machineName: host.name,
-          providerId,
+          providerId: PROVIDER_META[key].id as "codex" | "claude-code",
           source:
-            providerId === "codex"
+            key === "codex"
               ? ("system.usageLimits" as const)
               : ("host.claudeUsage" as const),
           status: "unknown" as const,
@@ -588,7 +621,7 @@ async function loadAccountReadback(
           credits: null,
           resetCredits: null,
           enrichmentScope:
-            providerId === "codex" ? ("primary-only" as const) : null,
+            key === "codex" ? ("owning-host" as const) : null,
           checkedAt: new Date().toISOString(),
         }));
 
@@ -637,7 +670,7 @@ async function loadAccountReadback(
           credits: provider.credits,
           resetCredits: provider.resetCredits,
           enrichmentScope:
-            provider.key === "codex" ? ("primary-only" as const) : null,
+            provider.key === "codex" ? ("owning-host" as const) : null,
           checkedAt: snapshot.fetchedAt,
         }));
     }),
@@ -714,13 +747,18 @@ type TokenCacheRow = {
   daily_json: string;
 };
 
-type PersistedTokenFile = {
-  version: 2;
-  daily: Record<string, TokenBucket>;
-  keyedEvents?: FileScanResult["keyedEvents"];
-  blobCount?: number;
-  maxRowid?: number;
-};
+type PersistedTokenFile = Omit<FileCacheEntry, "mtimeMs" | "size"> & { version: 2 };
+
+type LocalTokenScan = Awaited<ReturnType<typeof scanTokenFiles>> & { scannedAt: string };
+
+async function scanLocalTokens(options: Parameters<typeof scanTokenFiles>[0]): Promise<LocalTokenScan> {
+  const scanned = await scanTokenFiles(options);
+  const scannedAt = new Date().toISOString();
+  return {
+    ...scanned,
+    scannedAt,
+  };
+}
 
 function isPersistedTokenFile(value: unknown): value is PersistedTokenFile {
   if (!value || typeof value !== "object") return false;
@@ -774,9 +812,11 @@ function createTokenStore(bb: BbPluginApi) {
         ? parsed
         : { version: 2, daily: parsed as Record<string, TokenBucket> };
       loadCache.set(row.path, {
+        ...persisted,
         mtimeMs: row.mtime_ms,
         size: row.size,
         daily: persisted.daily,
+        observedAt: persisted.observedAt,
         ...(persisted.keyedEvents
           ? { keyedEvents: persisted.keyedEvents }
           : {}),
@@ -803,7 +843,8 @@ function createTokenStore(bb: BbPluginApi) {
   );
   const readMeta = db.prepare("SELECT value FROM token_meta WHERE key = ?");
 
-  let inflight: Promise<TokenSnapshot> | null = null;
+  let inflight: Promise<LocalTokenScan> | null = null;
+  let queuedForce: Promise<LocalTokenScan> | null = null;
   let lastSnapshot: TokenSnapshot | null = null;
 
   const publish = () => {
@@ -818,8 +859,10 @@ function createTokenStore(bb: BbPluginApi) {
           file.mtimeMs,
           file.size,
           JSON.stringify({
+            ...file,
             version: 2,
             daily: file.daily,
+            observedAt: file.observedAt,
             ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
             ...(file.blobCount != null
               ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
@@ -827,9 +870,11 @@ function createTokenStore(bb: BbPluginApi) {
           } satisfies PersistedTokenFile),
         );
         loadCache.set(file.path, {
+          ...file,
           mtimeMs: file.mtimeMs,
           size: file.size,
           daily: file.daily,
+          observedAt: file.observedAt,
           ...(file.keyedEvents ? { keyedEvents: file.keyedEvents } : {}),
           ...(file.blobCount != null
             ? { blobCount: file.blobCount, maxRowid: file.maxRowid }
@@ -899,10 +944,9 @@ function createTokenStore(bb: BbPluginApi) {
       files: FileScanResult[];
       changedFiles: number;
       daily: Record<string, Record<string, TokenBucket>>;
+      scannedAt: string;
     },
   ): TokenSnapshot => {
-    // Machines first: a location both a machine and the server can see is
-    // credited to the machine.
     const merged = mergeMachineTokens(
       [
         ...remote,
@@ -912,7 +956,7 @@ function createTokenStore(bb: BbPluginApi) {
           error: null,
           tokens: {
             computer: hostname(),
-            scannedAt: new Date().toISOString(),
+            scannedAt: local.scannedAt,
             changedFiles: local.changedFiles,
             slices: slicesFromScan(local),
           },
@@ -931,6 +975,7 @@ function createTokenStore(bb: BbPluginApi) {
     // A machine that answered with nothing in the window is only noise.
     return {
       ...snapshot,
+      observations: merged.observations,
       machines: merged.machines.filter(
         (row) => row.status !== "ok" || row.tokens > 0,
       ),
@@ -943,6 +988,7 @@ function createTokenStore(bb: BbPluginApi) {
       files: FileScanResult[];
       changedFiles: number;
       daily: Record<string, Record<string, TokenBucket>>;
+      scannedAt: string;
     },
   ) => {
     const snapshot = combine(days, scanned);
@@ -961,11 +1007,12 @@ function createTokenStore(bb: BbPluginApi) {
   const paintCachedStores = (
     scanned: {
       sources: string[];
+      files: FileScanResult[];
       daily: Record<string, Record<string, TokenBucket>>;
     },
   ) => {
-    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "cursor");
-    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "opencode");
+    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "cursor", scanned.files);
+    seedDailyFromCache(scanned.daily, scanned.sources, loadCache, "opencode", scanned.files);
   };
 
   /**
@@ -1006,22 +1053,33 @@ function createTokenStore(bb: BbPluginApi) {
       },
     });
 
-  const sync = async (days: TokenWindowDays, force = false) => {
-    if (inflight) return inflight;
+  const refresh = async (days: TokenWindowDays, force = false): Promise<LocalTokenScan> => {
+    if (inflight) {
+      if (!force) return inflight;
+      if (!queuedForce) {
+        queuedForce = inflight.catch(() => {}).then(() => {
+          queuedForce = null;
+          return refresh(days, true);
+        });
+      }
+      return queuedForce;
+    }
+    if (queuedForce) return queuedForce;
     inflight = (async () => {
       const nowMs = Date.now();
-      const cached = force ? new Map() : loadCache;
+      const cached = loadCache;
       const phase1Started = Date.now();
       // jsonl (Codex/Claude) is the cheap first paint. Seed cursor/opencode
       // from the last persisted totals so those series never vanish while
       // the heavier stores refresh.
-      const jsonl = await scanTokenFiles({
+      const jsonl = await scanLocalTokens({
         cached,
+        force,
         includeCursor: false,
         includeOpencode: false,
       });
       persistFiles(jsonl.files);
-      if (!force) paintCachedStores(jsonl);
+      paintCachedStores(jsonl);
       snapshotFrom(days, jsonl);
       publish();
       bb.log.info(
@@ -1030,8 +1088,9 @@ function createTokenStore(bb: BbPluginApi) {
 
       const phase2Started = Date.now();
       const [full] = await Promise.all([
-        scanTokenFiles({
+        scanLocalTokens({
           cached: loadCache,
+          force,
           includeCursor: true,
           includeOpencode: true,
         }),
@@ -1042,6 +1101,7 @@ function createTokenStore(bb: BbPluginApi) {
         ),
       ]);
       persistFiles(full.files);
+      paintCachedStores(full);
       const bbUsage = await scanBbThreads(nowMs);
       bbUsageDaily = bbUsage.daily;
       bbUsageProviders = bbUsage.providers;
@@ -1054,24 +1114,28 @@ function createTokenStore(bb: BbPluginApi) {
             .map((source) => `${source.name}${source.error ? " (stale)" : ""}`)
             .join(", ")}]`,
       );
-      const snapshot = snapshotFrom(days, full);
+      snapshotFrom(days, full);
       publish();
-      return snapshot;
+      return full;
     })().finally(() => {
       inflight = null;
     });
     return inflight;
   };
 
+  const sync = async (days: TokenWindowDays, force = false): Promise<TokenSnapshot> =>
+    combine(days, await refresh(days, force));
+
   const get = async (days: TokenWindowDays, force = false) => {
     if (force) return sync(days, true);
     if (lastSnapshot) {
       if (lastSnapshot.days !== days) {
-        const scanned = await scanTokenFiles({
+        const scanned = await scanLocalTokens({
           cached: loadCache,
           includeCursor: hasCursorCache(),
           includeOpencode: hasOpencodeCache(),
         });
+        persistFiles(scanned.files);
         paintCachedStores(scanned);
         return combine(days, scanned);
       }
@@ -1085,7 +1149,7 @@ function createTokenStore(bb: BbPluginApi) {
       }
       return lastSnapshot;
     }
-    const jsonl = await scanTokenFiles({
+    const jsonl = await scanLocalTokens({
       cached: loadCache,
       includeCursor: false,
       includeOpencode: false,
@@ -1339,6 +1403,27 @@ export default async function plugin(bb: BbPluginApi) {
     return { configured: true, secondsUntilReset: secondsUntilReset(now), accounts: rows };
   };
 
+  /**
+   * The Firstmate Pi read, asked of the one approved owning machine.
+   *
+   * Two facts live between polls — the last snapshot actually read and whether
+   * the last poll saw a producer failure note — and nothing else: every poll
+   * replaces the dataset rather than adding to it, so asking twice yields the
+   * same totals. The memory is in process only; a restart simply has no
+   * last-good figures to show, which is an honest state rather than a zero.
+   */
+  const piHosts = bb.hosts.experimental_client({ contract: hostContract });
+  const piUsage = createPiUsageReader({
+    hosts: async () =>
+      (await bb.sdk.hosts.list()).map((host) => ({
+        id: host.id,
+        name: host.name,
+        status: host.status,
+      })),
+    read: (hostId) => piHosts.call("externalPiUsage", null, { hostId }),
+    nowMs: () => Date.now(),
+  });
+
   bb.rpc.register(freeTokensContract, {
     async freeTokens() {
       return readFreeTokens();
@@ -1354,6 +1439,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     async getThroughput() {
       return throughput.snapshot();
+    },
+    async getExternalPiUsage() {
+      return piUsage.read();
     },
   });
 

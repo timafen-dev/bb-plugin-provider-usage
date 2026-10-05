@@ -15,6 +15,7 @@ import {
 
 export interface CursorFileScan {
   path: string;
+  birthMs?: number;
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
@@ -23,11 +24,13 @@ export interface CursorFileScan {
 }
 
 export interface CursorCacheEntry {
+  readError?: boolean;
   mtimeMs: number;
   size: number;
   daily: Record<string, TokenBucket>;
   blobCount?: number;
   maxRowid?: number;
+  unknownWindow?: TokenBucket;
 }
 
 export function isCursorStorePath(path: string): boolean {
@@ -198,8 +201,9 @@ function subtractBucket(next: TokenBucket, prev: TokenBucket): TokenBucket {
 
 /**
  * cursortrack on ACP stores: each user request bills the current context
- * window (capped), plus assistant output. Blobs have no timestamps, so the
- * first scan lands on session birth; later growth is attributed to mtime.
+ * window (capped), plus assistant output. Blobs have no event timestamps:
+ * `token-scan.ts` removes provisional day placement before publication and
+ * exposes the amount as an unknown-window observation.
  */
 function readAcpStoreIdentity(file: string): { blobCount: number; maxRowid: number } | null {
   const db = openSqlite(file);
@@ -335,6 +339,7 @@ export function scanCursorStores(options?: {
   nowMs?: number;
   home?: string;
   cached?: Map<string, CursorCacheEntry>;
+  force?: boolean;
 }): CursorFileScan[] {
   const cached = options?.cached ?? new Map();
   const cutoff = (options?.nowMs ?? Date.now()) - 90 * 24 * 60 * 60 * 1000;
@@ -350,9 +355,10 @@ export function scanCursorStores(options?: {
     if (times.size === 0) continue;
     if (times.mtimeMs < cutoff && times.birthMs < cutoff) continue;
 
-    const prior = cached.get(path);
+    const entry = cached.get(path);
+    const prior = entry?.unknownWindow ? { ...entry, daily: { unknown: entry.unknownWindow } } : entry;
     const fingerprintStale =
-      !prior ||
+      options?.force || !prior || prior.readError ||
       prior.mtimeMs !== times.mtimeMs ||
       prior.size !== times.size;
 
@@ -366,14 +372,10 @@ export function scanCursorStores(options?: {
       daily = prior.daily;
     } else {
       // WAL/SHM mtime chatter used to bust every store. Identity is COUNT +
-      // MAX(rowid): a checkpoint with no new blobs is a cache hit. An older
-      // cache row with totals but no identity is also kept — we just stamp
-      // the identity so the next pass can skip the open entirely.
+      // MAX(rowid): a checkpoint with no new blobs is a cache hit. Missing
+      // identity, a failed prior read or force requires rereading the bucket.
       const nextIdentity = readAcpStoreIdentity(path);
-      if (
-        prior?.daily &&
-        (prior.blobCount == null || identityUnchanged(prior, nextIdentity))
-      ) {
+      if (!options?.force && !prior?.readError && prior?.daily && identityUnchanged(prior, nextIdentity)) {
         daily = prior.daily;
         identity = nextIdentity ?? identity;
       } else {
@@ -388,6 +390,7 @@ export function scanCursorStores(options?: {
       path,
       mtimeMs: times.mtimeMs,
       size: times.size,
+      birthMs: times.birthMs,
       daily,
       ...(identity
         ? { blobCount: identity.blobCount, maxRowid: identity.maxRowid }

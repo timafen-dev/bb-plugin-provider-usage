@@ -32,7 +32,15 @@ import {
   type TokenWindowDays,
 } from "./lib/tokens";
 import { SERIES_STYLESHEET, providerColor } from "./lib/series-palette";
+import {
+  PI_LENSES,
+  PI_LENS_NATIVE,
+  piLensIsNative,
+  piLensOption,
+  type PiLens,
+} from "./lib/pi-usage-view";
 import { LiveThroughputSection } from "./components/live-throughput";
+import { PiUsageSection } from "./components/pi-usage";
 import {
   HomepageUsageSkeleton,
   ProviderLimitsSkeleton,
@@ -423,7 +431,7 @@ function TokenUsageSection() {
             </div>
             {data.totals.tokens === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No transcript token events in the last {data.days} days.
+                No date-placed transcript token events in the last {data.days} days.
               </p>
             ) : (
               <TokenChart snapshot={data} />
@@ -448,6 +456,20 @@ function TokenUsageSection() {
                       </span>
                     ) : null}
                   </span>
+                ))}
+              </div>
+            ) : null}
+            {data.observations?.length ? (
+              <div className="space-y-1 text-xs text-muted-foreground">
+                {data.observations.map((source, index) => (
+                  <p key={`${source.machineId}:${source.provider}:${source.sourceId}:${index}`} title={source.sourceId}>
+                    {source.machineName} · {source.provider} · {source.sourceId} · {source.historicalAggregate ? `Historical overlapping observation · Last known ${formatTokenCount(source.rawTokens)}` : `${formatTokenCount(source.rawTokens)} raw total`} · observed {source.observedAt ?? "unknown"}
+                    {source.status === "stale" && !source.historicalAggregate ? " · Last known" : ""}
+                    {source.unknownWindow > 0 ? ` · Last known ${formatTokenCount(source.unknownWindow)} · unknown window` : ""}
+                    {source.birthMs !== null ? ` · Filesystem birth ${new Date(source.birthMs).toISOString()}` : ""}
+                    {source.mtimeMs !== null ? ` · Filesystem mtime ${new Date(source.mtimeMs).toISOString()}` : ""}
+                    {source.message ? ` · ${source.message}` : ""}
+                  </p>
                 ))}
               </div>
             ) : null}
@@ -981,7 +1003,52 @@ function MachineLimits({
   );
 }
 
+/**
+ * Which dataset the page is showing.
+ *
+ * The two lenses are separate datasets, not two views of one: BB's own
+ * accounting stays exactly as it was on the native lens, and the Pi lens shows
+ * one external producer's recorded snapshot. Selecting Pi unmounts the native
+ * sections, so their polls stop rather than running on beside it, and no
+ * figure from either lens is ever added to the other.
+ */
+function SourceLens({
+  lens,
+  onLens,
+}: {
+  lens: PiLens;
+  onLens: (next: PiLens) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+      <div className="min-w-0">
+        <p className="text-sm font-medium">Source</p>
+        <p className="text-xs text-muted-foreground">{piLensOption(lens).hint}</p>
+      </div>
+      <div className="flex rounded-md border border-border p-0.5">
+        {PI_LENSES.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            aria-pressed={lens === option.id}
+            className={cn(
+              "rounded-sm px-2.5 py-1 text-xs font-medium",
+              lens === option.id
+                ? "bg-foreground text-background"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+            onClick={() => onLens(option.id)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DashboardPage() {
+  const [lens, setLens] = useState<PiLens>(PI_LENS_NATIVE);
   // The first card doubles as the machine list; the rest follow from it.
   const [hosts, setHosts] = useState<DashboardSnapshot["hosts"]>([]);
   const onHosts = useCallback((next: DashboardSnapshot["hosts"]) => {
@@ -999,21 +1066,28 @@ function DashboardPage() {
   return (
     <div className="h-full overflow-auto">
       <div className="mx-auto w-full max-w-6xl space-y-5 p-4 md:p-5">
-        <LiveThroughputSection />
-        <FreeTokensSection />
-        <TokenUsageSection />
+        <SourceLens lens={lens} onLens={setLens} />
+        {piLensIsNative(lens) ? (
+          <>
+            <LiveThroughputSection />
+            <FreeTokensSection />
+            <TokenUsageSection />
 
-        {shown.length === 0 ? (
-          <MachineLimits hostId={null} name={null} onHosts={onHosts} />
+            {shown.length === 0 ? (
+              <MachineLimits hostId={null} name={null} onHosts={onHosts} />
+            ) : (
+              shown.map((host, index) => (
+                <MachineLimits
+                  key={host.id}
+                  hostId={host.id}
+                  name={shown.length > 1 ? host.name : null}
+                  onHosts={index === 0 ? onHosts : undefined}
+                />
+              ))
+            )}
+          </>
         ) : (
-          shown.map((host, index) => (
-            <MachineLimits
-              key={host.id}
-              hostId={host.id}
-              name={shown.length > 1 ? host.name : null}
-              onHosts={index === 0 ? onHosts : undefined}
-            />
-          ))
+          <PiUsageSection />
         )}
       </div>
     </div>
@@ -1045,7 +1119,7 @@ function HomepageUsage() {
                 <p className="truncate text-sm font-medium">{provider.displayName}</p>
                 <p className="truncate text-xs text-muted-foreground">
                   {hero
-                    ? `${hero.label} · ${formatPercent(hero.remainingPercent)} left`
+                    ? `${provider.status === "stale" ? "Last known · " : ""}${hero.label} · ${formatPercent(hero.remainingPercent)} left`
                     : statusLabel(provider.status)}
                 </p>
               </div>

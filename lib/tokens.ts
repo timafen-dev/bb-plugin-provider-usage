@@ -45,6 +45,23 @@ export interface TokenSnapshot {
   series: TokenDay[];
   /** What each machine contributed; absent when only this disk was read. */
   machines?: TokenMachineRow[];
+  observations?: TokenSourceRow[];
+}
+
+export interface TokenSourceRow {
+  machineId: string;
+  machineName: string;
+  provider: string;
+  sourceId: string;
+  observedAt: string | null;
+  status: "ok" | "stale";
+  tokens: number;
+  unknownWindow: number;
+  rawTokens: number;
+  historicalAggregate?: boolean;
+  birthMs: number | null;
+  mtimeMs: number | null;
+  message: string | null;
 }
 
 export interface TokenMachineRow {
@@ -215,7 +232,7 @@ export function formatTokenText(snapshot: TokenSnapshot): string {
     "By provider",
   ];
   if (snapshot.providers.length === 0) {
-    lines.push("  No transcript token events in this window");
+    lines.push("  No date-placed transcript token events in this window");
   } else {
     for (const provider of snapshot.providers) {
       lines.push(
@@ -231,6 +248,21 @@ export function formatTokenText(snapshot: TokenSnapshot): string {
       lines.push(
         `  ${machine.name.padEnd(30)} ${(machine.status === "error" ? "—" : formatTokenCount(machine.tokens)).padStart(7)}${note}`,
       );
+    }
+  }
+  if (snapshot.observations?.length) {
+    lines.push("", "By source");
+    for (const source of snapshot.observations) {
+      lines.push(`  ${source.machineName} · ${providerDisplayName(source.provider)} · ${source.sourceId}`);
+      if (source.historicalAggregate) {
+        lines.push(`    Historical overlapping observation · Last known ${formatTokenCount(source.rawTokens)} · observed ${source.observedAt ?? "unknown"}`);
+      } else {
+        lines.push(`    ${formatTokenCount(source.tokens)} in window · ${formatTokenCount(source.rawTokens)} raw total · observed ${source.observedAt ?? "unknown"}${source.status === "stale" ? " · Last known" : ""}`);
+      }
+      if (source.unknownWindow > 0) lines.push(`    Last known ${formatTokenCount(source.unknownWindow)} · unknown window`);
+      if (source.birthMs !== null) lines.push(`    Filesystem birth ${new Date(source.birthMs).toISOString()}`);
+      if (source.mtimeMs !== null) lines.push(`    Filesystem mtime ${new Date(source.mtimeMs).toISOString()}`);
+      if (source.message) lines.push(`    ${source.message}`);
     }
   }
   return `${lines.join("\n")}\n`;

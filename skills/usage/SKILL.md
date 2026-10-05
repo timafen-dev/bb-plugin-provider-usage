@@ -6,7 +6,8 @@ description: Inspect remaining provider subscription usage, plans, reset windows
 # Usage dashboard
 
 Run `bb usage` (or `bb usage --json`) to read live subscription windows
-and token totals from this machine.
+and token totals. Source ownership is described in
+[README: How it works](../../README.md#how-it-works).
 
 ```bash
 bb usage
@@ -22,9 +23,9 @@ providers, `totals.tightest` for the most exhausted window, and each provider
 reset. Provider rows may also include `credits`, `resetCredits`, and
 `spendControl`; for Codex these expose purchased-credit balance, banked reset
 availability/expiry, and any backend-reported on-demand period. A window's
-`cost` gives exact used/limit dollars when the provider reports them. Use
-`tokens.totals` and `tokens.providers` for global Codex/Claude transcript token
-volume across Codex, Claude Code, Cursor, and opencode.
+`cost` gives exact used/limit dollars when the provider reports them. For dated
+token totals versus separately visible unknown-window and historical
+observations, follow [README: How it works](../../README.md#how-it-works).
 
 `bb usage live` answers "what is being burned right now": `tokensPerMinute` is
 the trailing-60-second rate, `peakTokensPerMinute` the best rate in the last 15
